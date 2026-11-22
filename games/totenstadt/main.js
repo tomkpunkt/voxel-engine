@@ -11,6 +11,8 @@ import { skyAt, flicker, nearestLights } from '../../engine/light/light.js';
 import { vnoise } from '../../engine/core/rand.js';
 import { Input } from '../../engine/platform/input.js';
 import { Synth } from '../../engine/platform/audio.js';
+import { Profiler, DebugOverlay } from '../../engine/platform/debug.js';
+import { saveGame, loadGame, deleteGame } from '../../engine/platform/storage.js';
 import { SCALE, TS, GN, W, H, VPM, DOOR_H, DOOR_W, DOORLEAF } from './scale.js';
 import { TILES, doorCells, doorCenter } from './city.js';
 import { createCity } from './stadt.js';
@@ -36,6 +38,15 @@ let flash = 0, nextBolt = 25, thunderT = -1, muzzleT = 0, openCont = null, toast
 let RS = 1, frameAvg = 0.016, slowT = 0, lastAimT = -9;
 
 const R = new Renderer(glc, { zMax: 34 });
+const prof = new Profiler();
+const dbg = new DebugOverlay(prof, () => {
+  let tiles = 0; if (world) for (const t of world.tiles.values()) if (t.vol) tiles++;
+  const st = R.stats;
+  return { Instanzen: st.insts, Calls: st.calls, Culled: st.culled, Fläche: st.area, Lichter: `${st.lights} (${st.lightRefs} Bez., ${st.slots} Plätze)`,
+    Kacheln: tiles, Welt: (world ? world.bytes() / 1e6 : 0).toFixed(1) + ' MB', GPU: (R.gpuBytes ? R.gpuBytes() / 1e6 : 0).toFixed(0) + ' MB',
+    Streaming: stream ? `${stream.pending} offen, ${stream.stats.done} fertig, ${stream.stats.stale} verworfen` : '-', Partikel: debris ? debris.list.length : 0,
+    Zombies: zombies.length, Auflösung: `1/${RS.toFixed(2)}` };
+});
 const cam = new Camera({ pitch: 52 * Math.PI / 180, yaw: Math.PI / 4 });
 const parts = new Particles();
 const synth = new Synth();
@@ -320,6 +331,7 @@ addEventListener('keydown', e => {
   if (k === 'c') cam.tilt(-0.12);
   if (k === 'v') cam.tilt(0.12);
   if (k === 'h') quickHeal();
+  if (k === 'f5') { e.preventDefault(); save(false); }
 });
 document.querySelectorAll('.tb[data-a]').forEach(b => b.addEventListener('pointerdown', e => {
   e.preventDefault(); e.stopPropagation(); synth.init();
@@ -450,20 +462,21 @@ function render(t) {
     if (!tileOn(f.tile) || !cam.onScreen(f.x, f.y, 80)) continue;
     R.drawSprite(TFL, Math.floor(t * 9 + f.x) % TFL.n, f.x, f.y, 0, { dens: 2, z: f.bz, shadow: 1 });
   }
-  // Lichter: 0 Taschenlampe (Spot), 1 Mündungsfeuer, 2 eigenes Restlicht, ab 3 die nächsten Lampen und Feuer
-  const ca = Math.cos(P.aim), sa = Math.sin(P.aim), L = [null, null, null];
+  // Lichter: Taschenlampe als Spot; Mündungsfeuer, eigenes Restlicht und alle Lampen/Feuer im Fenster als Punktlichter
+  // (je Bildschirmkachel verteilt, Schatten nur für die nächsten 8)
+  const ca = Math.cos(P.aim), sa = Math.sin(P.aim), L = [];
+  let spot = null;
   if (P.light && P.bat > 0) {
     const low = P.bat < 15 ? (vnoise(t * 9, 0, 1) > 0.35 ? 1 : 0.2) : 1, k = (0.55 + 0.45 * Math.min(1, P.bat / 40)) * low * 3.2;
-    L[0] = { x: P.x + ca * 1.5, y: P.y + sa * 1.5, z: 8.5, r: 85, color: [k, k * 0.96, k * 0.85] };
+    spot = { x: P.x + ca * 1.5, y: P.y + sa * 1.5, z: 8.5, r: 85, color: [k, k * 0.96, k * 0.85], dir: [ca, sa, -0.12], cos: 0.84 };
   }
-  if (muzzleT > 0) { const k = 3.5 * muzzleT / 0.06; L[1] = { x: P.x + ca * 3, y: P.y + sa * 3, z: 7.5, r: 45, color: [k, k * 0.75, k * 0.4] }; }
-  L[2] = { x: P.x, y: P.y, z: 11, r: 24, color: [0.42, 0.44, 0.52], shadow: false };
-  for (const l of nearestLights(city.lights, P.x, P.y, 5, 70, l => tileOn(l.tile))) {
+  if (muzzleT > 0) { const k = 3.5 * muzzleT / 0.06; L.push({ x: P.x + ca * 3, y: P.y + sa * 3, z: 7.5, r: 45, color: [k, k * 0.75, k * 0.4] }); }
+  L.push({ x: P.x, y: P.y, z: 11, r: 24, color: [0.42, 0.44, 0.52], shadow: false });
+  for (const l of nearestLights(city.lights, P.x, P.y, 120, 140, l => tileOn(l.tile))) {
     const f = flicker(l, t) * l.i;
     L.push({ x: l.x, y: l.y, z: l.z, r: l.r, color: [l.c[0] * f, l.c[1] * f, l.c[2] * f] });
   }
-  const sl = Math.hypot(ca, sa, 0.12);
-  R.light({ ambient: sky.ambient, sunColor: sky.sun, flash, eye: [P.x, P.y, 9], los: true, lights: L, spot: [ca / sl, sa / sl, -0.12 / sl, 0.84], time: t });
+  R.light({ ambient: sky.ambient, sunColor: sky.sun, sunDir: HOUR > 6.5 && HOUR < 19.5 ? sky.dir : null, flash, eye: [P.x, P.y, 9], los: true, lights: L, spot, maxShadowed: 8, time: t });
 }
 
 // ---- 2D-Ebene: Markierungen, Partikel, Regen, Sticks
@@ -548,18 +561,26 @@ function step(now) {
   frameAvg += (dt - frameAvg) * 0.05;
   if (frameTimes.length < 20000) frameTimes.push(now - last0); last0 = now;
   if (frameAvg > 0.027) { slowT += dt; if (slowT > 2 && RS < 2.4) { RS *= 1.25; resize(); slowT = 0; frameAvg = 0.016; } } else slowT = 0;
+  prof.begin('Streaming');
   stream.update(P.x, P.y);
   stream.run(6);                 // nur ohne Worker
+  prof.end('Streaming'); prof.begin('Logik');
 
   if (!paused) {
     gameTime += dt;
+    const pad = input.pollPad();
+    for (const b of input.padPressed) {
+      if (b === 'a') interact(); else if (b === 'x') startReload(); else if (b === 'y') cycleWeapon(); else if (b === 'b') toggleLight();
+      else if (b === 'start') openInv(null); else if (b === 'lb') cam.rotate(-Math.PI / 2); else if (b === 'rb') cam.rotate(Math.PI / 2); else if (b === 'back') quickHeal();
+    }
     let [mx, my] = input.keyDir();
+    if (pad.active && Math.hypot(...pad.move) > 0) [mx, my] = pad.move;
     let mag = Math.min(1, Math.hypot(mx, my));
     const SL = input.sticks.L, SRt = input.sticks.R;
     if (SL.id !== null) { const l = Math.hypot(SL.dx, SL.dy); if (l > 0.15) { mx = SL.dx; my = SL.dy; mag = Math.min(1, l); } }
     P.moving = false;
     // Rennen: Shift (Tastatur) oder Stick ganz am Rand (Touch); verbraucht Ausdauer
-    const wantRun = (input.keys.has('shift') || (SL.id !== null && Math.hypot(SL.dx, SL.dy) > 0.97)) && mag > 0.5;
+    const wantRun = (input.keys.has('shift') || pad.held.has('lt') || (SL.id !== null && Math.hypot(SL.dx, SL.dy) > 0.97)) && mag > 0.5;
     P.running = wantRun && !P.winded && P.st > 0 && !P.reloading;
     if (mag > 0.05) {
       const [wx, wy] = cam.dirToWorld(mx, my), sp = (P.running ? SPEED.run : SPEED.walk * mag) * (P.reloading ? 0.7 : 1) * (P.winded ? 0.8 : 1);
@@ -584,6 +605,9 @@ function step(now) {
         }
         if (ba !== null) P.aim = ba;
       }
+    } else if (pad.active) {
+      if (Math.hypot(...pad.aim) > 0.2) { const [wx, wy] = cam.dirToWorld(pad.aim[0], pad.aim[1]); P.aim = Math.atan2(wy, wx); lastAimT = gameTime; }
+      firing = pad.fire;
     } else if (input.mouse.active) {
       const [ax, ay] = cam.unproject(input.mouse.x / RS, input.mouse.y / RS, 7);
       P.aim = Math.atan2(ay - P.y, ax - P.x); firing = input.mouse.down;
@@ -617,8 +641,11 @@ function step(now) {
     cam.follow(P.x + Math.cos(P.aim) * 9, P.y + Math.sin(P.aim) * 9);
   }
   cam.update(paused ? 0 : dt);
+  prof.end('Logik'); prof.begin('Rendern');
   render(t);
+  prof.end('Rendern');
   drawOverlay(t, paused ? 0 : dt);
+  prof.frame(); dbg.update(dt);
   hudT -= dt; toastT -= dt;
   if (toastT <= 0) $('toast').textContent = '';
   $('hurt').style.opacity = Math.max(P.hurtT * 2, P.hp < 30 ? 0.25 + 0.15 * Math.sin(t * 4) : 0);
@@ -657,6 +684,8 @@ function newGame(s) {
   setTimeout(async () => {
     if (city && city.backend.terminate) city.backend.terminate();
     city = createCity(seed, { workers: params.has('ohneWorker') ? false : true }); world = city.world;
+    const sv = pendingSave; pendingSave = null;
+    if (sv) { world.importDeltas(sv.world); city.savedContainers = sv.containers; }
     R.attachWorld(world, 5);
     await city.whenReady();
     stream = new Streamer(world, R, { backend: city.backend, radius: 2, keep: 3 });
@@ -665,14 +694,49 @@ function newGame(s) {
     showWfc(); buildMini();
     P = newPlayer(); inv = []; addItem('bat', 1); addItem('pistol', 1); P.mags.pistol = 12; addItem('a9', 24); addItem('bandage', 1);
     P.weapon = 'pistol'; zombies = []; corpses = []; drops = []; parts.list.length = 0; kills = 0; gameTime = 0;
+    if (sv) applySaveAfterLoad(sv);
     cam.follow(P.x, P.y); cam.snap();
     await stream.fill(P.x, P.y, (a, n) => { $('stTxt').textContent = `Baue Viertel: ${a} / ${n} Grundstücke …`; });
     if (!params.has('leer')) for (let k = 0; k < 55; k++) spawnZombie(60, 999);
-    $('stTxt').textContent = `Stadt #${seed % 100000}: ${GN}×${GN} Grundstücke (${Math.round(W / VPM)} m). Es ist Nacht. Finde Waffen und Vorräte – und überlebe.`;
+    $('stTxt').textContent = sv ? `Spielstand geladen: Stadt #${seed % 100000}, ${Math.floor(gameTime / 60)} min überlebt.`
+      : `Stadt #${seed % 100000}: ${GN}×${GN} Grundstücke (${Math.round(W / VPM)} m). Es ist Nacht. Finde Waffen und Vorräte – und überlebe.`;
     $('bPlay').disabled = false;
+    $('bLoad').style.display = 'none';
+    if (!sv) loadGame(SAVE).then(x => { if (x) { $('bLoad').style.display = ''; $('bLoad').textContent = `Fortsetzen (Stadt #${x.seed % 100000})`; } });
   }, 30);
 }
+// =====================================================================
+//  SPIELSTAND (IndexedDB): Saat, Deltas der Welt, Türen über tile.state, Behälter, Spieler, Beute am Boden
+// =====================================================================
+const SAVE = 'totenstadt';
+function snapshot() {
+  const containers = {};
+  for (const c of city.containers) if (c.items) containers[c.id] = c.items;
+  return { format: 1, seed, gameTime, kills, world: world.exportDeltas(), containers,
+    player: { x: P.x, y: P.y, hp: P.hp, bat: P.bat, st: P.st, light: P.light, weapon: P.weapon, mags: P.mags, aim: P.aim },
+    inv, drops: drops.map(d => ({ x: d.x, y: d.y, name: d.name, items: d.items })), corpses: corpses.map(k => ({ x: k.x, y: k.y, rot: k.rot, v: k.v })) };
+}
+async function save(quiet) {
+  if (!running || !P || P.hp <= 0) return;
+  const n = await saveGame(SAVE, snapshot());
+  if (!quiet) toast(`Gespeichert (${(n / 1024).toFixed(0)} KB)`);
+}
+let pendingSave = null;
+async function continueGame() {
+  const sv = await loadGame(SAVE);
+  if (!sv) return;
+  pendingSave = sv; newGame(sv.seed);
+}
+function applySaveAfterLoad(sv) {
+  Object.assign(P, sv.player); P.rot = P.aim; inv = sv.inv; gameTime = sv.gameTime; kills = sv.kills;
+  drops = sv.drops; corpses = sv.corpses.map(k => ({ ...k, t: 0 }));
+  $('tbLight').classList.toggle('on', P.light);
+  cam.follow(P.x, P.y); cam.snap();
+}
+addEventListener('pagehide', () => { save(true); });
+setInterval(() => save(true), 60000);
 function gameOver() {
+  deleteGame(SAVE);
   running = false;
   const min = Math.floor(gameTime / 60), sec = Math.floor(gameTime % 60);
   $('deadTxt').textContent = `Überlebt: ${min} min ${sec} s · Zombies getötet: ${kills}`;
@@ -680,10 +744,11 @@ function gameOver() {
 }
 $('bPlay').addEventListener('click', () => { synth.init(); $('start').classList.remove('show'); running = true; paused = false; last = performance.now(); });
 $('bNew').addEventListener('click', () => newGame((Math.random() * 1e9) | 0));
+$('bLoad').addEventListener('click', () => continueGame());
 $('bAgain').addEventListener('click', () => { $('dead').classList.remove('show'); $('start').classList.add('show'); newGame((Math.random() * 1e9) | 0); });
 $('help').innerHTML = input.touch
   ? 'Linker Daumen: laufen, ganz ausziehen = rennen · Rechter Daumen: zielen, weit ziehen = feuern<br>Kamera-Taste ziehen = drehen und neigen, antippen = 90° drehen'
-  : 'WASD laufen · Shift rennen · Maus zielen · Linksklick feuern · R nachladen · E Tür/Behälter<br>Q Waffe · F Licht · I Inventar · H heilen · rechte Maustaste ziehen oder Z/X, C/V: Kamera drehen und neigen · Mausrad Zoom';
+  : 'WASD laufen · Shift rennen · Maus zielen · Linksklick feuern · R nachladen · E Tür/Behälter<br>Q Waffe · F Licht · I Inventar · H heilen · rechte Maustaste ziehen oder Z/X, C/V: Kamera drehen und neigen · Mausrad Zoom<br>F5 speichern (automatisch jede Minute) · F3 Debug · Gamepad: Sticks laufen/zielen, RT feuern, LT rennen, A Aktion, X laden, Y Waffe, B Licht';
 
 RS = input.touch ? 1 : (innerWidth > 1400 ? 2 : 1.5);
 TPG = R.createSprite(WALK.map(s => figureStack(survivorFn(s, false), 36, 44)));
@@ -697,4 +762,4 @@ requestAnimationFrame(step);
 // Für Tests und Debugging
 window.TS_DEBUG = { get P() { return P; }, get world() { return world; }, get city() { return city; }, get zombies() { return zombies; }, set zombies(v) { zombies = v; },
   get corpses() { return corpses; }, cam, R, get debris() { return debris; }, chip, get stream() { return stream; }, get frameAvg() { return frameAvg; }, interact, toggleDoor, applyDoor, fire,
-  get running() { return running; }, get gameTime() { return gameTime; }, highlights, doorCenter, nearestUsable, get frameTimes() { return frameTimes; } };
+  get running() { return running; }, save, continueGame, snapshot, prof, get gameTime() { return gameTime; }, highlights, doorCenter, nearestUsable, get frameTimes() { return frameTimes; } };

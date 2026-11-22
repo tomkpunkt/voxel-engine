@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Lichter-Stressszene – Voxel-Engine</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:ui-monospace,Menlo,Consolas,monospace;color:#d6dbe4}
+canvas{position:fixed;inset:0;width:100%;height:100%;image-rendering:pixelated;touch-action:none}
+#ui{position:fixed;left:10px;top:10px;background:#0c0f15d8;padding:8px 10px;font-size:11px;line-height:1.6;border-left:3px solid #c8a03a}
+#ui select{font:inherit;font-size:11px;background:#1b2230;color:#d6dbe4;border:1px solid #33405a}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="ui"><b>Lichter-Stressszene</b> · Lichter <select id="n"><option>8</option><option>32</option><option>64</option><option>128</option><option>256</option></select>
+ · mit Schatten <select id="s"><option>0</option><option>4</option><option selected>8</option><option>14</option></select><br><span id="info"></span></div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

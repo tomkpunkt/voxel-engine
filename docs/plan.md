@@ -82,3 +82,25 @@ Offen aus Etappe 3:
 - Große Gruppen fallen sofort an ihre Endlage (mit Staubwolke), nicht sichtbar animiert.
 - Zerstörung prüft die Tragfähigkeit nur im groben Gitter; Bricks mit weniger als halber Füllung tragen nicht.
 - Totenstadt-Möbel sind noch nicht einzeln zerstörbar (nur über die Wand-Logik, wenn man sie trifft).
+
+### Etappe 4 – erledigt (2026-11-22)
+
+Erweitert um den Wunsch „Optimierungen wie Grid Culling für bessere FPS“.
+
+- **Grid Culling** (`bake.chunkBounds`, `CHUNK = 16`): Jede Kachel ist in 16 × 16-Block-Stücke geteilt, je Stück wird die Höhe und pro z-Stufe das belegte Rechteck gebacken. Der Renderer zeichnet nur Stücke, deren Bildschirm-Rechteck sichtbar ist, und den Boden (z = 0) einmal pro Kachel. Kleine Welt: 190 → 117 ms pro Bild (Software-Rendering im Container, auf echter GPU entsprechend schneller).
+- **Viele Lichter** (`engine/light/light.js`, `renderer.light`): Bis 256 Lichter, in Bildschirm-Kacheln von 16 px einsortiert (48 je Kachel, hellste zuerst) und als Float-Texturen an den Licht-Shader gegeben. Statt Strahlen pro Pixel gibt es einen **Schwellen-Atlas**: Für Augen-Sicht, Taschenlampe und bis zu 14 Schatten werfende Lichter wird je eine 256²-Karte „ab welcher Höhe ist dieser Punkt sichtbar“ gerendert; der Licht-Shader liest nur noch einen Wert. Totenstadt: 116 → 70 ms.
+- **Sonne mit Richtung** (`lightDir(stunde)`, `sunDir`): Sonnenschatten als dynamische Schwellenkarte über dem Fenster, neu nur bei geänderter Richtung oder wenn sich das Fenster um 16 Blöcke verschiebt. Totenstadt und Kleine Welt drehen die Schatten mit der Uhrzeit (6:30–19:30).
+- **Spielstände** (`engine/platform/storage.js`): `saveGame/loadGame/deleteGame` über IndexedDB, Ausweichweg localStorage. Gespeichert werden Saat, Generatorversion, Unterteilung, Deltas, Brick-Deltas, Kachelzustand und Spieldaten; die Welt entsteht beim Laden neu aus dem Generator. Totenstadt: F5, automatisch alle 60 s und beim Verlassen der Seite, „Fortsetzen“ im Startbildschirm, gelöscht beim Tod.
+- **Plattform**: `Profiler` und `DebugOverlay` (F3 oder `?debug`: Bildzeit p50/p95, Abschnitte, Draw-Calls, Instanzen, verworfene Stücke, GPU-Speicher), Gamepad (`input.pollPad`, Totenstadt mit linkem/rechtem Stick und Tasten).
+- **Abnahme**:
+  - Lichter-Stressszene `examples/lichter/` (`?n=`, `?schatten=`) mit `tools/lichter.py`. p50 in ms (Software-Rendering), ohne / mit 8 Schattenlichtern: 8 Lichter 50 / 73, 32: 68 / 87, 64: 82 / 106, 128: 121 / 141, 256: 170 / 187. Bei 256 Lichtern fallen in vollen Bildschirm-Kacheln die schwächsten weg.
+  - `tests/spielstand.test.mjs`: Welt mit Durchbrüchen, Bricks und Türzustand speichern, neue Welt aus Saat + Generatorversion + Deltas aufbauen, Voxel für Voxel gleich; falsche Version oder Unterteilung wird abgelehnt. Im Browser: Tür, Kisten, Gesundheit, Lage, feine Blöcke nach Neuladen und „Fortsetzen“ gleich.
+  - `npm test`: 28 Tests. `tools/screenshots.py`: 11 Szenen ohne Fehler.
+
+Offen aus Etappe 4:
+- Lichter ohne Schatten scheinen durch Wände (nur die 14 nächsten werfen Schatten).
+- Bei sehr vielen Lichtern auf einer Stelle reicht die Kachelliste (48) nicht.
+
+### Nächster Schritt: Ragdolls
+
+Figuren fallen als Ragdoll (nach dem Vorbild von rapierjs-ragdoll): `engine/physics/ragdoll.js` mit Rapier.js (per CDN geladen) und einem kleinen Verlet-Ragdoll mit derselben Schnittstelle als Ersatz, wenn Rapier nicht lädt.

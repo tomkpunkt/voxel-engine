@@ -18,3 +18,6 @@ export { Input } from './platform/input.js';
 export { Synth } from './platform/audio.js';
 export { Debris, Emitter } from './destruct/debris.js';
 export { carve, shatter, checkSupport, drop } from './destruct/destruct.js';
+export { Profiler, DebugOverlay } from './platform/debug.js';
+export { saveGame, loadGame, deleteGame } from './platform/storage.js';
+export { binLights, lightDir, TILE, PER_TILE } from './light/light.js';

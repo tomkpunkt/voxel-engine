@@ -2,6 +2,8 @@
 //   Maus: rechte oder mittlere Taste ziehen = Kamera drehen (waagerecht) und neigen (senkrecht), Rad = Zoom
 //   Touch: linke Bildhälfte = linker Stick, rechte = rechter Stick; ein Kamera-Griff (Element) dreht und neigt beim Ziehen
 //   Tastatur: Q/E-ähnliche Belegungen macht das Spiel selbst über input.keys
+//   Gamepad (Standard-Belegung): pollPad() einmal pro Bild; linker Stick = Laufen, rechter = Zielen,
+//   RT = Feuer, Tasten als Namen in input.padPressed (nur im Bild des Drückens): a, b, x, y, lb, rb, lt, rt, back, start
 
 export class Input {
   /**
@@ -61,6 +63,23 @@ export class Input {
     if (o.cameraHandle) this.bindCameraHandle(o.cameraHandle);
   }
   stick() { return { id: null, bx: 0, by: 0, x: 0, y: 0, dx: 0, dy: 0 }; }
+  /** Gamepad abfragen. Ergebnis in this.pad = { active, move: [x, y], aim: [x, y], fire, held: Set } und this.padPressed. */
+  pollPad() {
+    const NAMES = ['a', 'b', 'x', 'y', 'lb', 'rb', 'lt', 'rt', 'back', 'start'];
+    const gp = typeof navigator !== 'undefined' && navigator.getGamepads ? [...navigator.getGamepads()].find(Boolean) : null;
+    const prev = this.pad ? this.pad.held : new Set();
+    this.padPressed = new Set();
+    if (!gp) { this.pad = { active: false, move: [0, 0], aim: [0, 0], fire: false, held: new Set() }; return this.pad; }
+    const dz = v => Math.abs(v) < 0.15 ? 0 : v;
+    const held = new Set();
+    NAMES.forEach((n, i) => { const b = gp.buttons[i]; if (b && (b.pressed || b.value > 0.5)) held.add(n); });
+    for (const n of held) if (!prev.has(n)) this.padPressed.add(n);
+    const move = [dz(gp.axes[0] || 0), dz(gp.axes[1] || 0)], aim = [dz(gp.axes[2] || 0), dz(gp.axes[3] || 0)];
+    const active = held.size > 0 || Math.hypot(...move) > 0 || Math.hypot(...aim) > 0;
+    this.pad = { active: active || (this.pad && this.pad.active), move, aim, fire: held.has('rt'), held };
+    if (active) { this.touch = false; this.mouse.active = false; }
+    return this.pad;
+  }
   moveStick(s, x, y) {
     const R = this.radius;
     let vx = x - s.bx, vy = y - s.by, l = Math.hypot(vx, vy);

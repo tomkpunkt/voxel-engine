@@ -12,11 +12,12 @@ python3 -m http.server 8765
 #   http://localhost:8765/                                  Übersicht
 #   http://localhost:8765/games/totenstadt/index.html       das Spiel
 #   http://localhost:8765/examples/kleine-welt/index.html   kleine Beispielwelt
+#   http://localhost:8765/examples/lichter/index.html       Lichter-Stressszene
 ```
 
 ES-Module laden nicht über `file://`, darum braucht es einen lokalen Server.
 
-URL-Parameter für reproduzierbare Bilder: `?saat=4711` (Stadt), `?zeit=12` (Uhrzeit 0–24), `?leer` (Totenstadt ohne Zombies), `?dichte=20|10|5` und `?sub=1|2|4` (Kleine Welt), `?ohneWorker`.
+URL-Parameter für reproduzierbare Bilder: `?saat=4711` (Stadt), `?zeit=12` (Uhrzeit 0–24), `?leer` (Totenstadt ohne Zombies), `?dichte=20|10|5` und `?sub=1|2|4` (Kleine Welt), `?ohneWorker`, `?debug` (Leistungsanzeige, auch F3), `?n=` und `?schatten=` (Lichter-Stressszene).
 
 ## Aufbau
 
@@ -30,12 +31,15 @@ engine/
   ecs/        ecs.js (Entities, Systeme), flowfield.js (Wegfindung)
   destruct/   debris.js (Block-Partikel, Emitter), destruct.js (carve, shatter, checkSupport, drop)
   gen/        wfc.js (Wave Function Collapse mit Sockeln), floorplan.js (Split-Grammatik)
-  platform/   input.js (Tastatur, Maus, Touch, Kamera-Gesten), audio.js (Synth)
+  platform/   input.js (Tastatur, Maus, Touch, Gamepad, Kamera-Gesten), audio.js (Synth),
+              debug.js (Profiler, F3-Anzeige), storage.js (Spielstände in IndexedDB)
   index.js    öffentliche API
 games/totenstadt/      das Spiel: Stadt-Generator, Figuren, Waffen, Spiellogik
 examples/kleine-welt/  zweite Szene über dieselbe API
+examples/lichter/      Stressszene mit bis zu 256 Lichtern
 tests/                 Node-Tests (DOM-frei)
 tools/screenshots.py   Headless-Screenshots mit fester Saat, Kamera, Tageszeit
+tools/lichter.py       Bildzeiten der Lichter-Stressszene
 ```
 
 ## Kleinstes Beispiel
@@ -88,6 +92,23 @@ debris.emitter({ x, y, z, rate: 20, colors: [0xffa030], settle: false });   // z
 // pro Bild: debris.update(dt); debris.commit(); … renderer.drawDebris(debris.list)
 ```
 
+## Licht und Spielstände
+
+```js
+renderer.light({
+  ambient, sunColor, sunDir: lightDir(stunde),         // Sonnenschatten mit Richtung
+  eye: { x, y, z }, los: true,                          // Sichtkegel-Verdeckung vom Auge
+  spot: { x, y, z, r, color, dir, cos, shadow: true },  // Taschenlampe
+  lights,                                               // bis 256 Punktlichter { x, y, z, r, color, shadow? }
+  maxShadowed: 8,                                       // so viele der nächsten werfen Schatten (≤ 14)
+});
+
+await saveGame('slot1', { seed, version, sub, world: world.exportDeltas(), spiel: { … } });
+const s = await loadGame('slot1');   // Welt neu aus dem Generator, dann world.importDeltas(s.world)
+```
+
+Gezeichnet werden nur die 16 × 16-Stücke einer Kachel, die im Bild liegen (Grid Culling). F3 zeigt, wie viele verworfen wurden.
+
 ## Wichtige Begriffe
 
 - **Kachel**: quadratischer Weltausschnitt (Totenstadt 80 × 80 × 32 Voxel). Wird aus Saat, Lage, Generatorversion und Spielzustand (`tile.state`) erzeugt; bleibende Änderungen liegen als **Deltas** daneben. Darum darf das Streaming Voxel jederzeit wegwerfen.
@@ -103,6 +124,7 @@ npm test                          # Node, ohne Browser
 python3 -m http.server 8765 &
 python3 tools/screenshots.py out  # braucht Playwright und Chrome
 python3 tools/rundgang.py bericht.json   # Rundgang über 2,4 km: Bildzeiten, Streaming, Speicher, Zustand nach Entladen
+python3 tools/lichter.py lichter.json    # Lichter-Stressszene: 8 bis 256 Lichter, mit und ohne Schatten
 ```
 
 ## Wissensbasis
