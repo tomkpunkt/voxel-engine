@@ -16,3 +16,5 @@ export { wfc, DIRS } from './gen/wfc.js';
 export { planRooms } from './gen/floorplan.js';
 export { Input } from './platform/input.js';
 export { Synth } from './platform/audio.js';
+export { Debris, Emitter } from './destruct/debris.js';
+export { carve, shatter, checkSupport, drop } from './destruct/destruct.js';

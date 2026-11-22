@@ -5,11 +5,13 @@ import { Camera } from '../../engine/render/camera.js';
 import { Particles } from '../../engine/render/particles.js';
 import { Streamer } from '../../engine/stream/streamer.js';
 import { FlowField } from '../../engine/ecs/flowfield.js';
+import { Debris } from '../../engine/destruct/debris.js';
+import { carve, shatter, checkSupport } from '../../engine/destruct/destruct.js';
 import { skyAt, flicker, nearestLights } from '../../engine/light/light.js';
 import { vnoise } from '../../engine/core/rand.js';
 import { Input } from '../../engine/platform/input.js';
 import { Synth } from '../../engine/platform/audio.js';
-import { SCALE, TS, GN, W, H, VPM, DOOR_H, DOOR_W } from './scale.js';
+import { SCALE, TS, GN, W, H, VPM, DOOR_H, DOOR_W, DOORLEAF } from './scale.js';
 import { TILES, doorCells, doorCenter } from './city.js';
 import { createCity } from './stadt.js';
 import { SD, survivorFn, zombieFn, figureStack, flameStack, WALK } from './models.js';
@@ -26,7 +28,7 @@ const PR = SCALE.figur.radius, ZR = 1.2;
 const SPEED = { walk: 9, run: 15, zWander: 2.5, zInvest: 4, zChase: 5.5, zFast: 11 };   // Voxel/s (5 = 1 m/s)
 let seed = params.has('saat') ? +params.get('saat') : (Math.random() * 1e9) | 0;
 const HOUR = params.has('zeit') ? +params.get('zeit') : 0;        // Tageszeit 0…24, Standard Mitternacht
-let city, world, stream, field;
+let city, world, stream, field, debris;
 let running = false, paused = false, gameTime = 0, kills = 0;
 let P, inv, zombies = [], corpses = [], drops = [];
 let TPG, TPM, TZ = [], TFL;
@@ -138,6 +140,10 @@ function fire() {
       hurtZombie(z, w.dmg * (tired ? 0.4 : 1) * (0.85 + Math.random() * 0.3), dx / d, dy / d, z.x, z.y); hit = true;
     }
     if (hit) kick(ca, sa, 3);
+    else if (P.weapon !== 'fists') {
+      const tw = world.ray(P.x, P.y, ca, sa, w.range, 6);
+      if (tw < w.range && chip(P.x + ca * (tw + 0.5), P.y + sa * (tw + 0.5), 6.5, P.weapon === 'axe' ? 1.1 : 0.8, { settle: true, from: [P.x, P.y, 6], speed: 6, max: 60, support: true })) { kick(ca, sa, 3); SND.bash(0.8); }
+    }
     makeNoise(P.x, P.y, w.noise);
     return;
   }
@@ -157,7 +163,10 @@ function fire() {
     const ex = P.x + dx * tw, ey = P.y + dy * tw;
     parts.add({ type: 'tracer', x: mx, y: my, z: 7, x2: ex, y2: ey, life: 0.07 });
     if (hz) hurtZombie(hz, w.dmg * (0.85 + Math.random() * 0.3), dx, dy, ex, ey);
-    else if (tw < w.range) emit('spark', ex - dx * 0.6, ey - dy * 0.6, 7, 5, { dir: Math.atan2(-dy, -dx), spread: 2, speed: 12, vz: 6, life: 0.4 });
+    else if (tw < w.range) {
+      emit('spark', ex - dx * 0.6, ey - dy * 0.6, 7, 5, { dir: Math.atan2(-dy, -dx), spread: 2, speed: 12, vz: 6, life: 0.4 });
+      chip(ex + dx * 0.3, ey + dy * 0.3, 7, P.weapon === 'shotgun' ? 0.35 : 0.45, { from: [ex + dx, ey + dy, 7], speed: 8, max: 12 });   // Einschuss
+    }
   }
   muzzleT = 0.06;
   emit('shell', P.x + Math.cos(P.aim + 1.57) * 1.2, P.y + Math.sin(P.aim + 1.57) * 1.2, 7, 1, { dir: P.aim + 1.57, spread: 0.6, speed: 6, vz: 6, life: 1.5 });
@@ -165,6 +174,17 @@ function fire() {
   SND[P.weapon]();
   kick(-ca, -sa, P.weapon === 'shotgun' ? 5 : 2.2);
   makeNoise(P.x, P.y, w.noise);
+}
+/** Wand an (x, y, z) anschlagen: Kugel ausschneiden (fein), Splitter fliegen, Türen bleiben unberührt. */
+function chip(x, y, z, r, o = {}) {
+  const { removed } = carve(world, x, y, z, r, { keep: (X, Y, Z, l) => (l & DOORLEAF) !== 0 });
+  if (!removed.length) return 0;
+  shatter(debris, removed, { settle: !!o.settle, from: o.from, speed: o.speed ?? 10, max: o.max ?? 40, lift: 3, life: 0.9 });
+  if (o.support) {
+    const s = checkSupport(world, Math.floor(x - 10), Math.floor(y - 10), Math.floor(x + 10), Math.floor(y + 10), { keep: (X, Y, Z, l) => (l & DOORLEAF) !== 0 });
+    if (s.detached.length) shatter(debris, s.detached, { settle: true, speed: 3, max: 300, lift: 0 });
+  }
+  return removed.length;
 }
 function startReload() {
   const w = WEAP[P.weapon];
@@ -250,7 +270,8 @@ function updateZombie(z, dt) {
       sp = 0; z.bashT -= dt;
       const [cx, cy] = doorCenter(dr); z.rot = Math.atan2(cy - z.y, cx - z.x);
       if (z.bashT <= 0) {
-        z.bashT = 0.8; dr.hp -= 1; SND.bash(volAt(cx, cy)); emit('spark', cx, cy, 6, 3, { speed: 4, vz: 4, life: 0.3 });
+        z.bashT = 0.8; dr.hp -= 1; SND.bash(volAt(cx, cy));
+        for (let k = 0; k < 6; k++) debris.emit({ x: cx + (Math.random() - 0.5) * 2, y: cy + (Math.random() - 0.5) * 2, z: 3 + Math.random() * 6, vx: (Math.random() - 0.5) * 8, vy: (Math.random() - 0.5) * 8, vz: 4 + Math.random() * 4, size: 0.25, color: 0x6a4a2e, life: 1.5 });
         if (dr.hp <= 0) { dr.broken = true; applyDoor(dr); emit('smoke', cx, cy, 6, 6, { speed: 3, life: 1 }); z.bashDoor = null; }
       }
     }
@@ -424,6 +445,7 @@ function render(t) {
     if (!cam.onScreen(k.x, k.y, 80)) continue;
     R.drawSprite(TZ[k.v], 5, k.x, k.y, k.rot, { dens: SD, z: 0.6, shadow: 1, ent: 2, tint: [0.25, 0.05, 0.03, 0.25], hi: Math.hypot(k.x - P.x, k.y - P.y) < 9 ? 0.5 : 0 });
   }
+  R.drawDebris(debris.list);
   for (const f of city.flames) {
     if (!tileOn(f.tile) || !cam.onScreen(f.x, f.y, 80)) continue;
     R.drawSprite(TFL, Math.floor(t * 9 + f.x) % TFL.n, f.x, f.y, 0, { dens: 2, z: f.bz, shadow: 1 });
@@ -587,6 +609,7 @@ function step(now) {
     const want = Math.min(110, 55 + Math.floor(gameTime / 60) * 5);
     if (zombies.length < want && Math.random() < dt * (zombies.length < want * 0.6 ? 12 : 2)) spawnZombie(70, 220);
     parts.update(dt, p => decal(p.x, p.y, [90, 12, 10], 0.65));
+    debris.update(dt); debris.commit();
     nextBolt -= dt;
     if (nextBolt <= 0) { flash = 1; nextBolt = 20 + Math.random() * 30; thunderT = 0.8 + Math.random() * 1.5; }
     flash = Math.max(0, flash - dt * 2.2); if (flash < 0.6 && flash > 0.5 && Math.random() < 0.1) flash = 0.9;
@@ -638,6 +661,7 @@ function newGame(s) {
     await city.whenReady();
     stream = new Streamer(world, R, { backend: city.backend, radius: 2, keep: 3 });
     field = new FlowField(world, 140);
+    debris = new Debris(world, { max: 1500 });
     showWfc(); buildMini();
     P = newPlayer(); inv = []; addItem('bat', 1); addItem('pistol', 1); P.mags.pistol = 12; addItem('a9', 24); addItem('bandage', 1);
     P.weapon = 'pistol'; zombies = []; corpses = []; drops = []; parts.list.length = 0; kills = 0; gameTime = 0;
@@ -672,5 +696,5 @@ requestAnimationFrame(step);
 
 // Für Tests und Debugging
 window.TS_DEBUG = { get P() { return P; }, get world() { return world; }, get city() { return city; }, get zombies() { return zombies; }, set zombies(v) { zombies = v; },
-  get corpses() { return corpses; }, cam, R, get stream() { return stream; }, get frameAvg() { return frameAvg; }, interact, toggleDoor, applyDoor, fire,
+  get corpses() { return corpses; }, cam, R, get debris() { return debris; }, chip, get stream() { return stream; }, get frameAvg() { return frameAvg; }, interact, toggleDoor, applyDoor, fire,
   get running() { return running; }, get gameTime() { return gameTime; }, highlights, doorCenter, nearestUsable, get frameTimes() { return frameTimes; } };

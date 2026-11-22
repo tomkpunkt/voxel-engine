@@ -3,7 +3,7 @@ import { World } from '../engine/world/world.js';
 import { Builder } from '../engine/stream/builder.js';
 
 export function makeWorld(gen, seed = 1) {
-  const w = new World({ tileSize: gen.tileSize, tilesX: gen.tilesX, tilesY: gen.tilesY, height: gen.height, seed, version: gen.version, blocks: gen.blocks });
+  const w = new World({ tileSize: gen.tileSize, tilesX: gen.tilesX, tilesY: gen.tilesY, height: gen.height, seed, version: gen.version, blocks: gen.blocks, sub: gen.sub, voxelSize: gen.voxelSize });
   w.builder = new Builder(gen, seed);
   return w;
 }

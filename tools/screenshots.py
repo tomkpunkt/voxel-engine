@@ -25,12 +25,18 @@ SZENEN = [
     ('kleine-welt-tag', '/examples/kleine-welt/index.html?zeit=11', {'yaw': 30, 'pitch': 50}, None),
     ('kleine-welt-abend', '/examples/kleine-welt/index.html?zeit=19.5', {'yaw': 160, 'pitch': 40}, None),
     ('kleine-welt-nacht', '/examples/kleine-welt/index.html?zeit=23', {'yaw': 250, 'pitch': 70}, None),
+    ('kleine-welt-10cm', '/examples/kleine-welt/index.html?zeit=11&dichte=10', {'yaw': 30, 'pitch': 50}, None),
+    ('kleine-welt-5cm', '/examples/kleine-welt/index.html?zeit=11&dichte=5', {'yaw': 30, 'pitch': 50}, None),
+    ('kleine-welt-carport', '/examples/kleine-welt/index.html?zeit=11', {'yaw': 30, 'pitch': 55, 'zoom': 2}, 'carport'),
 ]
 
 HAUS = """(()=>{const d=TS_DEBUG, P=d.P, c=d.city;
   const b=c.buildings.filter(b=>b.kind==='Haus').sort((a,e)=>Math.hypot((a.x0+a.x1)/2-P.x,(a.y0+a.y1)/2-P.y)-Math.hypot((e.x0+e.x1)/2-P.x,(e.y0+e.y1)/2-P.y))[0];
   for(const dr of c.doors) if(dr.x>=b.x0-1&&dr.x<=b.x1+1&&dr.y>=b.y0-1&&dr.y<=b.y1+1&&!dr.broken&&!dr.open){dr.open=true;d.applyDoor(dr);}
   P.x=(b.x0+b.x1)/2+0.5; P.y=(b.y0+b.y1)/2+0.5; for(let r=0;r<40&&!d.world.free(P.x,P.y,1.2);r++)P.x+=1;})()"""
+
+CARPORT = """(()=>{const d=VE_DEMO, c=d.carport, M=d.M; const y=c.y0+((c.y1-c.y0+1)>>1)+0.5*Math.max(1,Math.round(M(0.3)));
+  d.smashAt(c.x0+0.5, y, M(1.1)); d.smashAt(c.x1-0.5, y, M(1.1)); d.cam.follow((c.x0+c.x1)/2,(c.y0+c.y1)/2);})()"""
 
 async def main():
     os.makedirs(OUT, exist_ok=True)
@@ -48,8 +54,10 @@ async def main():
                 await pg.evaluate("document.getElementById('bPlay').click()")
             if aktion == 'haus':
                 await pg.evaluate(HAUS)
+            if aktion == 'carport':
+                await pg.evaluate(CARPORT)
             cam = 'TS_DEBUG.cam' if 'totenstadt' in url else 'VE_DEMO.cam'
-            js = f"(()=>{{const c={cam}, P=window.TS_DEBUG&&TS_DEBUG.P; if(P) c.follow(P.x,P.y); c.target.yaw={camv['yaw']}*Math.PI/180; c.target.pitch={camv['pitch']}*Math.PI/180; " \
+            js = f"(()=>{{const c={cam}, P=window.TS_DEBUG&&TS_DEBUG.P; if(P) c.follow(P.x,P.y); else if (window.VE_DEMO && VE_DEMO.carport && '{aktion}'==='carport') c.follow((VE_DEMO.carport.x0+VE_DEMO.carport.x1)/2,(VE_DEMO.carport.y0+VE_DEMO.carport.y1)/2); c.target.yaw={camv['yaw']}*Math.PI/180; c.target.pitch={camv['pitch']}*Math.PI/180; " \
                  f"{('c.target.zoom*=' + str(camv['zoom']) + ';') if 'zoom' in camv else ''} c.snap();}})()"
             await pg.evaluate(js)
             await pg.wait_for_timeout(1800)

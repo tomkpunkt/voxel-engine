@@ -8,7 +8,8 @@
 html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:ui-monospace,Menlo,Consolas,monospace;color:#d6dbe4;-webkit-user-select:none;user-select:none}
 canvas{position:fixed;inset:0;width:100%;height:100%;image-rendering:pixelated;touch-action:none}
 #ui{position:fixed;left:10px;top:10px;background:#0c0f15d8;padding:8px 10px;font-size:11px;line-height:1.6;border-left:3px solid #5a8ac0;max-width:290px}
-#ui input{width:150px;vertical-align:middle}
+#ui input[type=range]{width:120px;vertical-align:middle}
+#ui select,#ui button{font:inherit;font-size:11px;background:#1b2230;color:#d6dbe4;border:1px solid #33405a;border-radius:3px;padding:2px 6px}
 #cam{position:fixed;right:14px;bottom:14px;width:64px;height:64px;border-radius:50%;background:#0c0f15c0;border:1px solid #3a4456;color:#d6dbe4;font:inherit;font-size:10px;touch-action:none}
 </style>
 </head>
@@ -17,9 +18,11 @@ canvas{position:fixed;inset:0;width:100%;height:100%;image-rendering:pixelated;t
 <canvas id="ov"></canvas>
 <div id="ui">
   <b>Kleine Welt</b> – zweite Szene über dieselbe Engine-API<br>
-  Uhrzeit <input id="zeit" type="range" min="0" max="24" step="0.25"> <span id="zeitTxt"></span><br>
+  Dichte <select id="dichte"><option value="20">20 cm</option><option value="10">10 cm</option><option value="5">5 cm</option></select>
+  · Uhrzeit <input id="zeit" type="range" min="0" max="24" step="0.25"> <span id="zeitTxt"></span><br>
   Ziehen mit rechter Maustaste oder dem Kamera-Knopf: drehen und neigen · Rad: Zoom<br>
-  Klick / Tipp: Voxel wegschlagen (bleibt als Delta erhalten)<br>
+  Klick / Tipp: Stück herausschlagen (Ränder fein unterteilt, bleibt als Delta erhalten). Schlag die Stützen des Carports weg.<br>
+  <label><input id="liegen" type="checkbox"> Trümmer bleiben liegen</label> · <button id="sand">Sand an</button><br>
   <span id="info"></span>
 </div>
 <button id="cam">⟲ Kamera</button>
