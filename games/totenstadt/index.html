@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Totenstadt</title>
+<style>
+:root{--acc:#c8463a;--ui:#0c0f15e8;--line:#2a3140;--txt:#d6dbe4;--dim:#8b93a3}
+html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--txt);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+canvas.full{position:fixed;inset:0;width:100%;height:100%;image-rendering:pixelated;image-rendering:crisp-edges;touch-action:none}
+#hud{position:fixed;left:calc(8px + env(safe-area-inset-left));top:calc(8px + env(safe-area-inset-top));font-size:11px;background:var(--ui);padding:7px 9px;border-left:3px solid var(--acc);line-height:1.5;pointer-events:none;min-width:150px}
+.bar{height:6px;background:#222833;margin:2px 0 5px;position:relative}
+.bar i{position:absolute;left:0;top:0;bottom:0;background:#b8382e}
+.bar.bat i{background:#d8c35a}
+.bar.st i{background:#5aa86a}.bar.st.low i{background:#c87a2a}
+#hud .w{font-size:12px;color:#fff}
+#hud .s{color:var(--dim)}
+#mini{position:fixed;right:calc(8px + env(safe-area-inset-right));top:calc(8px + env(safe-area-inset-top));width:110px;height:110px;border:1px solid var(--line);background:#000;image-rendering:pixelated;pointer-events:none;opacity:.9}
+#tbtns{position:fixed;right:calc(10px + env(safe-area-inset-right));top:50%;transform:translateY(-50%);display:none;flex-direction:column;gap:9px;z-index:5}
+body.touch #tbtns{display:flex}
+.tb{width:54px;height:54px;border-radius:50%;background:#0c0f15c0;border:1px solid #3a4456;color:var(--txt);font:inherit;font-size:10px;display:flex;align-items:center;justify-content:center;flex-direction:column;line-height:1.1;touch-action:none}
+.tb b{font-size:17px;font-weight:400}
+.tb.on{border-color:#d8c35a}
+#prompt{position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--ui);border:1px solid #6a5a2a;color:#f0dc8a;padding:10px 16px;font:inherit;font-size:13px;border-radius:6px;display:none;z-index:6;touch-action:none}
+#toast{position:fixed;left:50%;top:calc(14px + env(safe-area-inset-top));transform:translateX(-50%);font-size:12px;color:#f0dc8a;text-shadow:0 1px 2px #000;pointer-events:none;text-align:center;white-space:pre}
+.panel{position:fixed;inset:0;background:#05070bcc;display:none;align-items:center;justify-content:center;z-index:20}
+.panel.show{display:flex}
+.box{background:#10141c;border:1px solid var(--line);width:min(760px,96vw);max-height:90vh;display:flex;flex-direction:column;padding:12px;box-sizing:border-box}
+.box h2{margin:0 0 8px;font-size:14px;color:#fff;letter-spacing:.06em}
+.cols{display:flex;gap:10px;min-height:0;flex:1}
+.col{flex:1;display:flex;flex-direction:column;min-width:0}
+.col h3{margin:0 0 6px;font-size:11px;color:var(--dim);font-weight:400;text-transform:uppercase;letter-spacing:.08em}
+.list{overflow-y:auto;-webkit-overflow-scrolling:touch;flex:1;border:1px solid #1c222d;max-height:60vh}
+.it{display:flex;align-items:center;gap:8px;padding:7px 8px;border-bottom:1px solid #1a1f29;font-size:12px}
+.it .ic{width:22px;text-align:center;font-size:16px}
+.it .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.it .nm small{color:var(--dim)}
+.it.eq{background:#1d2a1d}
+.it button,.box>.row button{font:inherit;font-size:11px;background:#1b2230;color:var(--txt);border:1px solid #33405a;padding:6px 8px;border-radius:4px}
+.box>.row{display:flex;gap:8px;margin-top:10px}
+.box>.row button{flex:1;padding:10px}
+.empty{color:var(--dim);font-size:12px;padding:12px}
+.screen{position:fixed;inset:0;background:radial-gradient(#141a24,#000 75%);display:none;flex-direction:column;align-items:center;justify-content:center;z-index:30;text-align:center;padding:20px;box-sizing:border-box}
+.screen.show{display:flex}
+.screen h1{font-size:clamp(30px,8vw,54px);margin:0;letter-spacing:.14em;color:#d8d2c4;text-shadow:0 0 18px #7a1d16}
+.screen p{color:var(--dim);font-size:12px;max-width:520px;line-height:1.6}
+.screen button{font:inherit;font-size:14px;background:#7a231b;color:#fff;border:0;padding:12px 26px;margin:6px;border-radius:4px}
+.screen button.sec{background:#1b2230;border:1px solid #33405a}
+#wfc{width:min(240px,60vw);height:min(240px,60vw);image-rendering:pixelated;border:1px solid var(--line);margin:10px 0}
+@media (max-height:520px){#tbtns{top:auto;bottom:calc(8px + env(safe-area-inset-bottom));transform:none;flex-wrap:wrap-reverse;height:168px;width:112px;gap:6px}.tb{width:50px;height:50px}#mini{width:80px;height:80px}}
+#hurt{position:fixed;inset:0;pointer-events:none;box-shadow:inset 0 0 120px #a00;opacity:0}
+</style>
+</head>
+<body>
+<canvas id="gl" class="full"></canvas>
+<canvas id="ov" class="full"></canvas>
+<div id="hurt"></div>
+<div id="hud"></div>
+<canvas id="mini" width="96" height="96"></canvas>
+<div id="toast"></div>
+<button id="prompt"></button>
+<div id="tbtns">
+  <button class="tb" data-a="interact"><b>✋</b>Aktion</button>
+  <button class="tb" data-a="reload"><b>↻</b>Laden</button>
+  <button class="tb" data-a="weapon"><b>⇄</b>Waffe</button>
+  <button class="tb on" data-a="light" id="tbLight"><b>◐</b>Licht</button>
+  <button class="tb" data-a="inv"><b>▤</b>Inventar</button>
+  <button class="tb" id="tbCam"><b>⟲</b>Kamera</button>
+</div>
+<div id="inv" class="panel"><div class="box">
+  <h2 id="invTitle">INVENTAR</h2>
+  <div class="cols">
+    <div class="col" id="colC"><h3 id="contName">Behälter</h3><div class="list" id="listC"></div></div>
+    <div class="col"><h3 id="bagName">Rucksack</h3><div class="list" id="listB"></div></div>
+  </div>
+  <div class="row"><button id="takeAll">Alles nehmen</button><button id="invClose">Schließen</button></div>
+</div></div>
+<div id="start" class="screen show">
+  <h1>TOTENSTADT</h1>
+  <p id="stTxt">Generiere Stadt …</p>
+  <canvas id="wfc" width="12" height="12"></canvas>
+  <div><button id="bPlay">Spielen</button><button id="bNew" class="sec">Andere Stadt</button></div>
+  <p id="help"></p>
+</div>
+<div id="dead" class="screen">
+  <h1>DU BIST TOT</h1>
+  <p id="deadTxt"></p>
+  <div><button id="bAgain">Neue Stadt</button></div>
+</div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
