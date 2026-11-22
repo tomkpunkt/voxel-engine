@@ -10,7 +10,7 @@
 // Kachel (tx, ty) belegt den Platz (tx mod win, ty mod win). Instanzen tragen Welt- und Texturposition getrennt,
 // darum muss beim Wandern nichts umkopiert werden.
 import { VS_G, FS_G, VS_L, FS_L } from './shaders.js';
-import { bakeBox, sliceBounds, DEFAULT_SUN } from './bake.js';
+import { bakeBox, bakeBricks, sliceBounds, DEFAULT_SUN } from './bake.js';
 import { MAX_LIGHTS } from '../light/light.js';
 
 const MAX_INST = 30000;
@@ -111,7 +111,43 @@ export class Renderer {
       this.uploadHeight(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
       this.rebake(x0 - 1, y0 - 1, x1 + 1, y1 + 1);    // 1 Voxel Rand: Normalen und Verdeckung der Nachbarn ändern sich mit
     });
-    world.on('tileUnloaded', t => { if (this.resident(t)) { this.slotOwner[this.slotOf(t.tx, t.ty)] = -1; } t.gpu = null; });
+    world.on('tileUnloaded', t => { if (this.resident(t)) { this.slotOwner[this.slotOf(t.tx, t.ty)] = -1; } this.dropTile(t); });
+    // Brick-Atlas: AW × AW Plätze zu S × S × S Texeln (S Ebenen), nur bei Unterteilung
+    if (this.BA) { gl.deleteTexture(this.BA); gl.deleteTexture(this.BB); this.BA = this.BB = null; }
+    const S = world.sub;
+    if (S > 1) {
+      this.AW = Math.floor(512 / S); this.ATW = this.AW * S;   // S = 4: 128² Plätze (16 384 Bricks, 8 MB)
+      this.BA = this.texArray(this.ATW, this.ATW, S); this.BB = this.texArray(this.ATW, this.ATW, S);
+      this.freeSlots = []; for (let k = this.AW * this.AW - 1; k >= 0; k--) this.freeSlots.push(k);
+    }
+    // Farbatlas für Block-Partikel (eine Zeile, eine Ebene)
+    if (!this.DA) {
+      this.DW = 1024; this.DA = this.texArray(this.DW, 1, 1);
+      const nb = new Uint8Array(this.DW * 4); for (let k = 0; k < this.DW; k++) nb.set([128, 128, 127, 0], k * 4);   // Normale nach oben, ohne Verdeckung, Schattenbit aus
+      for (let k = 0; k < this.DW; k++) nb[k * 4 + 2] = 127 | 128;
+      this.DB = this.texArray(this.DW, 1, 1, nb); this.dColors = new Map();
+    }
+  }
+  /** Brick-Plätze einer Kachel freigeben. */
+  dropTile(t) {
+    if (t.gpu && t.gpu.bricks && this.freeSlots) for (const slot of t.gpu.bricks.values()) this.freeSlots.push(slot);
+    t.gpu = null;
+  }
+  uploadBrick(slot, A, B, off) {
+    const gl = this.gl, S = this.world.sub, n = S * S * S * 4, u = (slot % this.AW) * S, v = ((slot / this.AW) | 0) * S;
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.BA); gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, u, v, 0, S, S, S, gl.RGBA, gl.UNSIGNED_BYTE, A.subarray(off, off + n));
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.BB); gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, u, v, 0, S, S, S, gl.RGBA, gl.UNSIGNED_BYTE, B.subarray(off, off + n));
+  }
+  /** Gebackene Bricks einer Kachel hochladen (keys = Blockindizes). Alte Plätze der Kachel werden ersetzt. */
+  uploadBricks(t, keys, A, B) {
+    if (!this.freeSlots) return;
+    const g = t.gpu, S3 = this.world.sub ** 3;
+    if (!g.bricks) g.bricks = new Map();
+    keys.forEach((i, k) => {
+      let slot = g.bricks.get(i);
+      if (slot === undefined) { slot = this.freeSlots.pop(); if (slot === undefined) return; g.bricks.set(i, slot); }
+      this.uploadBrick(slot, A, B, k * S3 * 4);
+    });
   }
   slotOf(tx, ty) { const w = this.win; return (((ty % w) + w) % w) * w + (((tx % w) + w) % w); }
   /** Liegt die Kachel aktuell gebacken auf der GPU? */
@@ -136,7 +172,7 @@ export class Renderer {
   }
 
   /** Fertig gebackene Kachel (aus einem Worker) in ihren Platz laden. A wird behalten (Decals). */
-  uploadTile(t, A, B, bb) {
+  uploadTile(t, A, B, bb, bricks) {
     const world = this.world, gl = this.gl, TS = world.TS, H = world.H;
     const ox = t.tx * TS, oy = t.ty * TS;
     for (const dc of t.decals) this.paintDecal(A, dc.x - ox, dc.y - oy, dc.c, dc.a, TS);
@@ -144,9 +180,12 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.TWA); gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, sx, sy, 0, TS, TS, H, gl.RGBA, gl.UNSIGNED_BYTE, A);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.TWB); gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, sx, sy, 0, TS, TS, H, gl.RGBA, gl.UNSIGNED_BYTE, B);
     const prev = this.slotOwner[s];
-    if (prev >= 0 && prev !== t.key) { const old = world.tiles.get(prev); if (old) old.gpu = null; }
+    if (prev >= 0 && prev !== t.key) { const old = world.tiles.get(prev); if (old) this.dropTile(old); }
     this.slotOwner[s] = t.key;
-    t.gpu = { A, bb, sx, sy, rev: t.rev };
+    const oldBricks = t.gpu && t.gpu.bricks;
+    t.gpu = { A, bb, sx, sy, rev: t.rev, bricks: new Map() };
+    if (oldBricks && this.freeSlots) for (const slot of oldBricks.values()) this.freeSlots.push(slot);
+    if (bricks && bricks.keys.length) this.uploadBricks(t, [...bricks.keys], bricks.A, bricks.B);
     this.uploadHeight(ox, oy, TS, TS);
   }
   /** Ganze Kachel im Haupt-Thread backen (ohne Worker). Nachbarn sollten geladen sein, sonst fehlen Normalen am Rand. */
@@ -154,7 +193,13 @@ export class Renderer {
     const world = this.world, TS = world.TS, H = world.H;
     const n = TS * TS * H * 4, A = new Uint8Array(n), B = new Uint8Array(n), ox = t.tx * TS, oy = t.ty * TS;
     bakeBox((x, y, z) => world.getC(x, y, z), (x, y, z) => world.getL(x, y, z), ox, oy, TS, TS, H, true, A, B, this.sun);
-    this.uploadTile(t, A, B, sliceBounds(t.vol.data, TS, TS, H));
+    let bricks = null;
+    if (t.vol.bricks.size) { const keys = [...t.vol.bricks.keys()]; bricks = { keys, ...this.bakeBricksOf(t, keys) }; }
+    this.uploadTile(t, A, B, sliceBounds(t.vol.data, TS, TS, H), bricks);
+  }
+  bakeBricksOf(t, keys) {
+    const w = this.world;
+    return bakeBricks((x, y, z) => w.getFine(x, y, z), (x, y, z) => w.getFineLay(x, y, z), (x, y, z) => w.getC(x, y, z), keys, w.TS, t.tx * w.TS, t.ty * w.TS, w.H, w.sub, this.sun);
   }
   /** Rechteck in Weltkoordinaten neu backen, auch über Kachelgrenzen. */
   rebake(x0, y0, x1, y1) {
@@ -181,6 +226,14 @@ export class Renderer {
       A[q] = g.A[s]; A[q + 1] = g.A[s + 1]; A[q + 2] = g.A[s + 2];
     }
     g.bb = sliceBounds(t.vol.data, TS, TS, H);   // Rechtecke können schrumpfen (Zerstörung) oder wachsen
+    // Bricks im Bereich neu backen, entfernte freigeben
+    if (this.freeSlots) {
+      const inR = i => { const x = ox + i % TS, y = oy + ((i / TS) | 0) % TS; return x >= x0 && x <= x1 && y >= y0 && y <= y1; };
+      if (!g.bricks) g.bricks = new Map();
+      for (const [i, slot] of g.bricks) if (inR(i) && !t.vol.bricks.has(i)) { g.bricks.delete(i); this.freeSlots.push(slot); }
+      const keys = []; for (const i of t.vol.bricks.keys()) if (inR(i)) keys.push(i);
+      if (keys.length) { const bb = this.bakeBricksOf(t, keys); this.uploadBricks(t, keys, bb.A, bb.B); }
+    }
     g.rev = t.rev;
     const tx = g.sx + x0 - ox, ty = g.sy + y0 - oy;
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.TWA); gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, tx, ty, 0, w, d, H, gl.RGBA, gl.UNSIGNED_BYTE, A);
@@ -245,7 +298,8 @@ export class Renderer {
     const tn = o.tint || [0, 0, 0, 0]; gl.uniform4f(u.uTint, tn[0], tn[1], tn[2], tn[3]);
     const cu = o.cut || [0, 0, 0, 0]; gl.uniform4f(u.uCut, cu[0], cu[1], cu[2], cu[3]);
     gl.uniform1f(u.uHiAll, o.hi || 0);
-    gl.uniform4fv(u.uHiR, o.rects ? this.HIR : this.HI0); gl.uniform4fv(u.uHiZ, o.rects ? this.HIZ : this.HI0);
+    const hr = o.rects === true ? this.HIR : o.rects ? o.rects[0] : this.HI0, hz = o.rects === true ? this.HIZ : o.rects ? o.rects[1] : this.HI0;
+    gl.uniform4fv(u.uHiR, hr); gl.uniform4fv(u.uHiZ, hz);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D_ARRAY, TA);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D_ARRAY, TB);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.ibuf); gl.bufferData(gl.ARRAY_BUFFER, this.INST.subarray(0, count * 8), gl.STREAM_DRAW);
@@ -284,6 +338,54 @@ export class Renderer {
         }
       }
     this.drawInst(this.TWA, this.TWB, cam.M, this.WIN, this.WIN, c, 0, { cut: o.cut, rects: true });   // Welt-Normalen sind schon in Weltkoordinaten
+    if (this.freeSlots) this.drawBricks(gx0, gy0, gx1, gy1, o);
+  }
+  /** Feine Blöcke: im feinen Raum (Matrix · 1/S), jede feine Scheibe ein Quad, Tiefe weiter nur aus z. */
+  drawBricks(gx0, gy0, gx1, gy1, o) {
+    const world = this.world, cam = this.cam, TS = world.TS, S = world.sub, INST = this.INST;
+    const n = Math.max(1, Math.ceil(cam.dzu / S));
+    let c = 0;
+    for (let ty = Math.max(0, Math.floor(gy0 / TS)); ty <= Math.min(world.tilesY - 1, Math.floor(gy1 / TS)); ty++)
+      for (let tx = Math.max(0, Math.floor(gx0 / TS)); tx <= Math.min(world.tilesX - 1, Math.floor(gx1 / TS)); tx++) {
+        const t = world.tileOf(tx, ty); if (!this.resident(t) || !t.gpu.bricks || !t.gpu.bricks.size) continue;
+        for (const [i, slot] of t.gpu.bricks) {
+          const bx = tx * TS + i % TS, by = ty * TS + ((i / TS) | 0) % TS, bz = (i / (TS * TS)) | 0;
+          const u = (slot % this.AW) * S, v = ((slot / this.AW) | 0) * S;
+          for (let sz = 0; sz < S; sz++) for (let j = 0; j < n && c < MAX_INST; j++) {
+            INST.set([sz, bz + sz / S + j / (n * S), bx * S, by * S, S, S, u, v], c * 8); c++;
+          }
+        }
+      }
+    if (!c) return;
+    const cut = o.cut ? o.cut.map(v => v * S) : null;
+    const hr = this.HIR.map((v, k) => (k % 4) < 4 ? v * S : v);
+    this.drawInst(this.BA, this.BB, cam.M.scale(1 / S), this.ATW, this.ATW, c, 0, { cut, rects: [hr, this.HIZ] });
+  }
+
+  /**
+   * Block-Partikel in einem Draw-Call. list: [{ x, y, z, size, color }] (size in Blöcken, ≤ 1; color 0xRRGGBB).
+   * Würfel ohne Drehung, oben beleuchtet; Tiefe wie alles andere aus z.
+   */
+  drawDebris(list) {
+    if (!list.length) return;
+    const gl = this.gl, cam = this.cam, INST = this.INST;
+    let c = 0;
+    for (const p of list) {
+      if (c >= MAX_INST) break;
+      const s = Math.min(1, p.size), ci = this.debrisColor(p.color & 0xffffff);
+      const k = Math.max(1, Math.ceil(s * cam.dzu));
+      for (let j = 0; j < k && c < MAX_INST; j++) { INST.set([0, p.z + s * j / k, p.x - s / 2, p.y - s / 2, s, s, ci + (1 - s) / 2, (1 - s) / 2], c * 8); c++; }
+    }
+    this.drawInst(this.DA, this.DB, cam.M, this.DW, 1, c, 0, { shadow: 1 });
+  }
+  debrisColor(col) {
+    let i = this.dColors.get(col);
+    if (i !== undefined) return i;
+    if (this.dColors.size >= this.DW) this.dColors.clear();
+    i = this.dColors.size; this.dColors.set(col, i);
+    const gl = this.gl; gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.DA);
+    gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, i, 0, 0, 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([(col >> 16) & 255, (col >> 8) & 255, col & 255, 255]));
+    return i;
   }
 
   /**

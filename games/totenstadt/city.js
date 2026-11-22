@@ -5,7 +5,7 @@ import { wfc } from '../../engine/gen/wfc.js';
 import { planRooms } from '../../engine/gen/floorplan.js';
 import { hash3, vnoise, mulberry32, pick, ri } from '../../engine/core/rand.js';
 import { C, E, shade, jit } from '../../engine/core/voxel.js';
-import { VPM, M, SCALE, TS, GN, W, D, H, WALL_H, DOOR_H, DOOR_W, CLEAR, ROOF, WALLTOP, DOORLEAF, DOOROPEN, DIRS, GEN_VERSION } from './scale.js';
+import { VPM, M, SCALE, TS, GN, W, D, H, WALL_H, DOOR_H, DOOR_W, CLEAR, ROOF, WALLTOP, DOORLEAF, DOOROPEN, DIRS, GEN_VERSION, SUB } from './scale.js';
 
 // ---- Kacheltypen und Sockel
 //  Kante einer Straßenkachel: R (Straße, Kachel mit ≤ 2 Ästen), J (Straße an Kreuzung/T),
@@ -73,7 +73,7 @@ export function createGenerator(config) {
   const grid = plan.grid;
   const tileKind = (tx, ty) => (tx < 0 || ty < 0 || tx >= GN || ty >= GN) ? null : TILES[grid[ty * GN + tx]];
   const roadDirs = (tx, ty) => [0, 1, 2, 3].filter(d => { const k = tileKind(tx + DIRS[d][0], ty + DIRS[d][1]); return k && k.kind === 'road'; });
-  return { tileSize: TS, tilesX: GN, tilesY: GN, height: H, version: GEN_VERSION, blocks, generate };
+  return { tileSize: TS, tilesX: GN, tilesY: GN, height: H, version: GEN_VERSION, sub: SUB, voxelSize: 1 / VPM, blocks, generate };
 
   function generate(tile, vol, ctx) {
   const key = tile.key, tx = tile.tx, ty = tile.ty, rng = ctx.rng, doorState = (ctx.state && ctx.state.doors) || [];

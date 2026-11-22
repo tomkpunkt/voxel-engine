@@ -3,7 +3,7 @@
 import { World } from '../../engine/world/world.js';
 import { LocalBackend, WorkerBackend } from '../../engine/stream/streamer.js';
 import { cityPlan, createGenerator, blocks, doorCells, doorVoxels } from './city.js';
-import { TS, GN, H, GEN_VERSION } from './scale.js';
+import { TS, GN, H, GEN_VERSION, SUB, VPM } from './scale.js';
 
 /**
  * @param {number} seed
@@ -11,7 +11,7 @@ import { TS, GN, H, GEN_VERSION } from './scale.js';
  */
 export function createCity(seed, o = {}) {
   const plan = cityPlan(seed);
-  const world = new World({ tileSize: TS, tilesX: GN, tilesY: GN, height: H, seed, version: GEN_VERSION, blocks });
+  const world = new World({ tileSize: TS, tilesX: GN, tilesY: GN, height: H, seed, version: GEN_VERSION, blocks, sub: SUB, voxelSize: 1 / VPM });
   const city = { seed, world, grid: plan.grid, order: plan.order, buildings: [], lights: [], containers: [], flames: [], doors: [] };
   const c0 = (GN >> 1) * TS + TS / 2;
   city.spawn = { x: c0 + 0.5, y: c0 + 0.5 };

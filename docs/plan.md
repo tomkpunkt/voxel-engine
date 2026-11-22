@@ -21,7 +21,7 @@ Die Engine entsteht aus [Totenstadt](../games/totenstadt/) heraus, in spielbaren
 |---|---|---|
 | 1 · Extraktion | Totenstadt läuft mit ausgelagerten Modulen. Eine zweite Szene lädt eine kleine Voxelwelt über dieselbe API. | Node-Tests für Weltabfragen und Deltas. Headless-Screenshots mit fester Saat, Kamera und Tageszeit sichern die Darstellung ab. |
 | 2 · Streaming | Man kann eine Stadt von über 1 km Ausdehnung durchqueren. Worker erzeugen, backen und entladen Kacheln entlang der Route. | Ein reproduzierbarer Rundgang misst Framezeiten und Speicher. Geänderte Kacheln behalten beim Entladen und erneuten Laden ihren Zustand. |
-| 3 · Zerstörung | Wände und Möbel lassen sich beschädigen. Abgetrennte Teile werden zu Trümmern. | Ein Durchbruch aktualisiert Darstellung, Kollision und Sicht auch an einer Kachelgrenze. Eine Testszene prüft ein Dach mit intakter und entfernter Stütze. |
+| 3 · Zerstörung | Wände und Möbel lassen sich beschädigen. Abgetrennte Teile werden zu Trümmern. Grunddichte pro Welt (20, 10 oder 5 cm), einzelne Blöcke fein unterteilbar, Block-Partikel mit Emittern. | Ein Durchbruch aktualisiert Darstellung, Kollision und Sicht auch an einer Kachelgrenze. Eine Testszene prüft ein Dach mit intakter und entfernter Stütze. |
 | 4 · Licht und Spielstände | Viele dynamische Lichter laufen zusammen. Eine beschädigte Szene lässt sich speichern und fortsetzen. | Eine Lichter-Stressszene liefert vergleichbare Framezeiten. Der Lade-Test rekonstruiert die Welt aus Seed, Generatorversion und Deltas. |
 | 5 · Optionale Erweiterungen | Ein WebGPU-Backend oder Mehrspieler ergänzt den spielbaren Stand. | Für WebGPU rendert dieselbe Beispielszene über beide Backends. Für Mehrspieler führen dieselben Änderungen bei zwei Clients zum selben Weltzustand. |
 
@@ -62,3 +62,23 @@ Offen aus Etappe 2:
 - Echte Bildzeiten auf Handy und Desktop-GPU messen (der Rundgang läuft auch dort, wenn man ihn im Browser von Hand startet).
 - Speicher der Worker-Caches (je bis zu 40 Kacheln, etwa 16 MB) zählt der Rundgang nicht mit.
 - Zombies verschwinden weiterhin am Fensterrand.
+
+### Etappe 3 – erledigt (2026-11-22)
+
+Erweitert um die Wünsche „Dichte einstellbar (20, 10, 5 cm)“, „Unterteilung eines Blocks in 10- oder 5-cm-Blöcke“ und „Partikel-Emitter für Blöcke“ (Entscheidungen: Grunddichte + Unterteilung; Partikel je Emitter liegen bleiben oder verschwinden; alles in Etappe 3).
+
+- **Grunddichte** (`World.voxelSize`, `world.m(meter)`): Die Engine rechnet weiter in Blöcken; Inhalte werden in Metern beschrieben und umgerechnet. Kleine Welt mit `?dichte=20|10|5` (gleiche Szene, gleiche Größe in Metern; bei 5 cm eine kleinere Fläche, weil das GPU-Fenster mit der Dichte hoch drei wächst). Figuren werden in Metern bei 5 cm modelliert, ihre Sprite-Dichte ist `voxelSize / 0,05`. Totenstadt bleibt bei 20 cm (ihr Generator rechnet in festen Blockmaßen).
+- **Unterteilung** (`World.sub` = S, `Volume.bricks`): Ein Block kann zu S³ feinen Blöcken werden (S = 2 oder 4). Gespeichert nur dort, als Uint16-Indizes in dieselbe Palette. Im groben Gitter steht ein Stellvertreter mit Flag `SUB` (häufigste Farbe), wenn mindestens die Hälfte gefüllt ist, sonst leer; Höhe, Kollision und Sicht arbeiten damit weiter grob. `world.getFine/editFine`, Brick-Deltas überstehen Entladen und Spielstand.
+- **Darstellung der Bricks**: eigener Textur-Atlas (S = 4: 128 × 128 Plätze, 8 MB), gebacken im Worker (Normalen und Verdeckung im feinen Gitter, Schatten über das grobe), gezeichnet im feinen Raum (Matrix · 1/S) mit derselben Tiefe aus z. Neubacken nach Änderungen auch über Kachelgrenzen.
+- **Block-Partikel** (`engine/destruct/debris.js`): Würfel mit Schwerkraft (9,81 m/s² umgerechnet), Abprallen, Reibung, Kollision im feinen Gitter. `settle` je Partikel bzw. Emitter: liegen bleiben (wird als feine Blöcke in die Welt geschrieben, ein Commit pro Bild) oder verschwinden. `Emitter` mit Rate, Stoß, Form (Punkt, Quader, Kugel), Richtung mit Streukegel, Geschwindigkeit, Farben, Dauer. Gezeichnet mit `renderer.drawDebris` in einem Draw-Call (Farbatlas mit 1 024 Farben).
+- **Zerstörung** (`engine/destruct/destruct.js`): `carve` schneidet eine Kugel aus (ganz innen liegende Blöcke grob, angeschnittene fein), `shatter` macht Trümmer daraus, `checkSupport` sucht lose Gruppen (keine Verbindung zum Boden oder zum Rand des Prüfquaders), `drop` lässt eine große Gruppe als Ganzes fallen, bis sie aufliegt.
+- **Szenen**: Kleine Welt mit Carport (Dachplatte auf zwei Stützen), Glut-Emitter (verschwindet), Sand-Emitter (bleibt liegen), Schalter „Trümmer bleiben liegen“. Totenstadt: Einschüsse und Axt-/Schlägertreffer schlagen Stücke aus Wänden (Türen ausgenommen), Zombies splittern Türen.
+- **Abnahme**:
+  - Durchbruch an einer Kachelgrenze: Kollision, Höhe und Sicht auf beiden Seiten aktualisiert, ein Ereignis überspannt die Grenze (Renderer backt beide Kacheln neu) – `tests/zerstoerung.test.mjs`.
+  - Dach mit intakter Stütze bleibt stehen; Stütze durchschlagen → genau eine lose Gruppe, Platte entfernt, unterer Stützenrest steht; als Ganzes fallen gelassen liegt die Platte danach stabil. Im Browser: Carport bleibt nach der ersten Stütze stehen und fällt nach der zweiten, bei 20, 10 und 5 cm.
+  - `npm test`: 25 Tests. `tools/screenshots.py`: 11 Szenen (neu: 10 cm, 5 cm, Carport nach dem Einsturz). `tools/rundgang.py`: unverändert (785 Kacheln, 0 verworfen, Zustand nach Entladen stimmt).
+
+Offen aus Etappe 3:
+- Große Gruppen fallen sofort an ihre Endlage (mit Staubwolke), nicht sichtbar animiert.
+- Zerstörung prüft die Tragfähigkeit nur im groben Gitter; Bricks mit weniger als halber Füllung tragen nicht.
+- Totenstadt-Möbel sind noch nicht einzeln zerstörbar (nur über die Wand-Logik, wenn man sie trifft).

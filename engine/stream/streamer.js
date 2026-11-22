@@ -113,7 +113,7 @@ export class Streamer {
     if (r.rev !== t.rev) { this.stats.stale++; return; }        // veraltet: nächstes update() beauftragt neu
     const vol = r.vol instanceof Volume ? r.vol : Volume.unpack(r.vol);
     if (!t.vol) { if (!w.install({ ...r, vol })) { this.stats.stale++; return; } }
-    if (this.renderer && r.A && this.inWindow(r.tx, r.ty)) { this.renderer.uploadTile(t, r.A, r.B, r.bb); this.stats.uploaded++; }
+    if (this.renderer && r.A && this.inWindow(r.tx, r.ty)) { this.renderer.uploadTile(t, r.A, r.B, r.bb, r.bricks); this.stats.uploaded++; }
   }
   /** Synchron abarbeiten (nur LocalBackend): bis zum Zeitbudget in ms. */
   run(budgetMs = 6) {
