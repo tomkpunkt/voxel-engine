@@ -101,6 +101,18 @@ Offen aus Etappe 4:
 - Lichter ohne Schatten scheinen durch Wände (nur die 14 nächsten werfen Schatten).
 - Bei sehr vielen Lichtern auf einer Stelle reicht die Kachelliste (48) nicht.
 
-### Nächster Schritt: Ragdolls
+### Ragdolls – erledigt (2026-11-22)
 
-Figuren fallen als Ragdoll (nach dem Vorbild von rapierjs-ragdoll): `engine/physics/ragdoll.js` mit Rapier.js (per CDN geladen) und einem kleinen Verlet-Ragdoll mit derselben Schnittstelle als Ersatz, wenn Rapier nicht lädt.
+Wunsch: „Für die Figuren, high-performance Rapier.js engine, based on the rapierjs-ragdoll repository.“
+
+- **`engine/physics/ragdoll.js`** mit einer Schnittstelle und zwei Backends: `createRagdollWorld(world, { backend: 'auto' | 'rapier' | 'verlet' })`, `spawn(skelett, { x, y, z, rot, vel, hit, hitVel })`, `step(dt)`, `pose()` → Mittelpunkt und Drehmatrix je Teil.
+  - **Rapier** (`@dimforge/rapier3d-compat@0.19`, per `import()` vom CDN, nur wenn angefordert): ein Körper je Teil (Quader für den Rumpf, Kapseln für Kopf und Glieder), Kugelgelenke an Hals, Schultern, Hüften, Scharniere mit Grenzen an Ellbogen und Knien, wie in rapierjs-ragdoll. Die Welt kommt als feste Quader je Säule (aus `world.height`) um den Ragdoll dazu. **Im Container nicht getestet** (kein Netz); fällt bei einem Fehler oder nach 6 s auf Verlet zurück.
+  - **Verlet**: 15 Gelenkpunkte, Abstandsbedingungen für Knochen, starrer Rumpf, Mindestabstände gegen Zusammenklappen, Kollision gegen das grobe Voxelgitter (von oben aufsetzen, von der Seite zurück), Reibung am Boden, Schlafen nach 0,5 s Ruhe.
+- **Revoxelisierung** (`RagdollModel`): Jeder Voxel des Ruhe-Sprites wird einmal einem Teil zugeordnet (nächster Knochen relativ zum Radius). Pro Bild wird jeder Zielvoxel in die Ruhelage seines Teils zurückgerechnet und dort nachgeschlagen – keine Löcher, Farben und Details bleiben. Ein Raster von 60 × 60 × 48 bei 4 Voxeln je Block; gebacken nur im belegten Bereich (`bakeRegion`) und hochgeladen in einen veränderlichen Sprite (`renderer.createDynamicSprite/updateSprite`). Liegt der Ragdoll still, wird er zugeschnitten und als fester Sprite behalten (`spriteFromGrid`).
+- **Totenstadt** (`games/totenstadt/leichen.js`): Zombies fallen als Ragdoll in Schussrichtung, höchstens 4 gleichzeitig (ältere werden festgehalten). Die Pose wird im Spielstand gespeichert und beim Laden wieder voxelisiert. `?ragdoll=rapier|verlet|aus`.
+- **Abnahme**: `tests/ragdoll.test.mjs` (Ruhe-Pose ergibt das Ruhevolumen, auch gedreht; Ragdoll fällt, ruht, Knochenlängen bleiben; nicht durch Wände; Rückfall auf Verlet). Im Browser: Fall sichtbar, Leichen bleiben liegen, Spielstand stellt Lage und Pose exakt wieder her. `tools/screenshots.py`: neue Szene `totenstadt-ragdoll`.
+- **Kosten** (Node, Software): Voxelisieren stehend 1,9 ms, liegend deutlich weniger; Backen 1,2 ms. Ein Ragdoll kostet nur während des Fallens (unter einer Sekunde).
+
+Offen:
+- Rapier im Browser mit Netz ausprobieren (`?ragdoll=rapier` erzwingt es und zeigt Fehler in der Konsole).
+- Ragdolls stoßen nicht gegeneinander; Möbel und Fahrzeuge zählen über die Säulenhöhe.

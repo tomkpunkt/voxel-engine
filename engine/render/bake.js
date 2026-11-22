@@ -36,6 +36,15 @@ export function bakeBox(get, lay, x0, y0, w, d, h, shadow, A, B, sun = DEFAULT_S
     bakeOne(solid, march, x, y, z, c, l, sun, A, B, q, 1);
   }
 }
+/** Wie bakeBox ohne Bodenschatten, aber nur im Bereich [x0,x1)×[y0,y1)×[0,z1) eines w×d-Rasters (Rest bleibt unverändert). */
+export function bakeRegion(get, lay, w, d, x0, x1, y0, y1, z1, A, B, sun = DEFAULT_SUN) {
+  const solid = (x, y, z) => z >= 0 && get(x, y, z) !== 0;
+  for (let z = 0; z < z1; z++) for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    const c = get(x, y, z), q = ((z * d + y) * w + x) * 4;
+    if (!c) { A[q + 3] = 0; continue; }
+    bakeOne(solid, null, x, y, z, c, lay(x, y, z), sun, A, B, q, 1);
+  }
+}
 /** Schattenstrahl zum Hauptlicht über das grobe Gitter (scale: Feinheit der Startkoordinaten). */
 function marcher(get, h, sun) {
   return (px, py, pz) => {

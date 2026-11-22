@@ -29,6 +29,7 @@ engine/
   render/     camera.js (freie Kamera), bake.js (Voxel → Texturen), renderer.js (WebGL2), shaders.js, particles.js
   light/      light.js – Tageszeit, Flackern, Lichtauswahl
   ecs/        ecs.js (Entities, Systeme), flowfield.js (Wegfindung)
+  physics/    ragdoll.js – Ragdolls (Rapier.js vom CDN oder eigener Verlet), Revoxelisierung der Teile
   destruct/   debris.js (Block-Partikel, Emitter), destruct.js (carve, shatter, checkSupport, drop)
   gen/        wfc.js (Wave Function Collapse mit Sockeln), floorplan.js (Split-Grammatik)
   platform/   input.js (Tastatur, Maus, Touch, Gamepad, Kamera-Gesten), audio.js (Synth),
@@ -108,6 +109,22 @@ const s = await loadGame('slot1');   // Welt neu aus dem Generator, dann world.i
 ```
 
 Gezeichnet werden nur die 16 × 16-Stücke einer Kachel, die im Bild liegen (Grid Culling). F3 zeigt, wie viele verworfen wurden.
+
+## Ragdolls
+
+```js
+const phys = await createRagdollWorld(world, { backend: 'auto' });   // Rapier, sonst Verlet
+const model = new RagdollModel(ruheVolumen, humanoid(), 4);           // Ruhe-Sprite + Skelett
+const rd = phys.spawn(model.skel, { x, y, z: 1, rot, vel: [vx, vy, 0], hit: 'head', hitVel: [...] });
+const grid = makeGrid(60, 60, 48), spr = renderer.createDynamicSprite(60, 60, 48);
+// pro Bild:
+phys.step(dt);
+const b = model.voxelize(rd.pose(), grid);  renderer.updateSprite(spr, grid, b);
+renderer.drawSprite(spr, 0, b.x, b.y, 0, { dens: 4, z: b.z });
+// still: const { grid: g, dx, dy } = cropGrid(grid, b); renderer.spriteFromGrid(g) …
+```
+
+Rapier wird nur geladen, wenn man es will (`backend: 'auto'` oder `'rapier'`); das ist die einzige Abhängigkeit von außen und bleibt optional.
 
 ## Wichtige Begriffe
 
