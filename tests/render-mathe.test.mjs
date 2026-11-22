@@ -59,6 +59,6 @@ test('Backen: Belegung, Flags, Leuchten, Verdeckung, Schatten', () => {
   assert.ok(ao(6, 6, 0) > ao(2, 4, 0), 'Boden neben der Säule ist stärker verdeckt');
   assert.equal(B[q(6, 6, 0) + 2] >> 7, 1, 'freier Boden im Licht');
   assert.equal(B[q(4, 4, 0) + 2] >> 7, 0, 'Boden unter dem Würfelturm im Schatten');
-  const bb = sliceBounds(v.col, 8, 8, 8);
+  const bb = sliceBounds(v.data, 8, 8, 8);
   assert.deepEqual([...bb.subarray(0, 4)], [0, 0, 7, 7]); assert.deepEqual([...bb.subarray(4, 8)], [1, 4, 4, 4]); assert.equal(bb[7 * 4], 1);
 });

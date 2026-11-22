@@ -2,8 +2,9 @@
 // DOM-freie Module (in Node testbar): core/*, world/*, gen/*, ecs/*, light/*, render/bake.js, render/camera.js
 export { hash3, vnoise, mulberry32, tileSeed, pick, ri } from './core/rand.js';
 export { SOLID, EMIT, C, E, FLAG, shade, jit, rgbOf, Volume, buildStack } from './core/voxel.js';
-export { World } from './world/world.js';
-export { Streamer } from './stream/streamer.js';
+export { World, columnInfo } from './world/world.js';
+export { Streamer, LocalBackend, WorkerBackend } from './stream/streamer.js';
+export { Builder } from './stream/builder.js';
 export { Camera, Mat2D } from './render/camera.js';
 export { bakeBox, sliceBounds, octEnc, octDec, DEFAULT_SUN } from './render/bake.js';
 export { Renderer } from './render/renderer.js';

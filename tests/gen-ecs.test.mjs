@@ -5,14 +5,14 @@ import { wfc, DIRS } from '../engine/gen/wfc.js';
 import { planRooms } from '../engine/gen/floorplan.js';
 import { FlowField } from '../engine/ecs/flowfield.js';
 import { ECS, movementSystem } from '../engine/ecs/ecs.js';
-import { World } from '../engine/world/world.js';
+import { makeWorld } from './hilfe.mjs';
 import { mulberry32 } from '../engine/core/rand.js';
 import { C } from '../engine/core/voxel.js';
 import { cityPlan, TILES, SOCK, SJ, SF } from '../games/totenstadt/city.js';
 
 test('WFC mit Sockeln: Totenstadt-Pläne ohne Kreuzung an Kreuzung und ohne Doppelstraße', () => {
   for (let s = 1; s <= 30; s++) {
-    const r = cityPlan(s), n = 12;
+    const r = cityPlan(s, 12), n = 12;
     assert.ok(r, `Saat ${s}`);
     for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) for (let d = 0; d < 4; d++) {
       const nx = x + DIRS[d][0], ny = y + DIRS[d][1];
@@ -48,15 +48,15 @@ test('Grundriss: jedes Zimmer über Türen erreichbar, Haustür an der Straßens
 });
 
 function wandWelt() {
-  return new World({
-    tileSize: 32, tilesX: 1, tilesY: 1, height: 8, seed: 1,
+  return makeWorld({
+    tileSize: 32, tilesX: 1, tilesY: 1, height: 8,
     generate: (t, vol) => { for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) { vol.set(x, y, 0, C(1)); if (x === 16 && y < 26) for (let z = 1; z < 6; z++) vol.set(x, y, z, C(2)); } },
   });
 }
 
 test('Flow Field führt um die Wand herum', () => {
   const w = wandWelt(); w.ensure(0, 0);
-  const f = new FlowField(w); f.compute(24, 5, 200);
+  const f = new FlowField(w, 60); f.compute(24, 5, 60);
   const e = { x: 8, y: 5 };
   for (let i = 0; i < 400 && Math.hypot(e.x - 24, e.y - 5) > 1.5; i++) { const d = f.dir(e.x, e.y); assert.ok(d); w.move(e, d[0] * 0.5, d[1] * 0.5, 1); }
   assert.ok(Math.hypot(e.x - 24, e.y - 5) <= 1.5, `angekommen bei ${e.x.toFixed(1)}, ${e.y.toFixed(1)}`);

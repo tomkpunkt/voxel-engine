@@ -10,7 +10,8 @@ import { vnoise } from '../../engine/core/rand.js';
 import { Input } from '../../engine/platform/input.js';
 import { Synth } from '../../engine/platform/audio.js';
 import { SCALE, TS, GN, W, H, VPM, DOOR_H, DOOR_W } from './scale.js';
-import { createCity, TILES, doorCells, doorVoxels, doorCenter } from './city.js';
+import { TILES, doorCells, doorCenter } from './city.js';
+import { createCity } from './stadt.js';
 import { SD, survivorFn, zombieFn, figureStack, flameStack, WALK } from './models.js';
 import { WEAP, ITEMS, rollLoot } from './data.js';
 
@@ -59,15 +60,7 @@ const tileOn = key => R.resident(world.tiles.get(key));
 // =====================================================================
 //  TÜREN
 // =====================================================================
-function applyDoor(dr) {
-  const tile = world.tiles.get(dr.tile); if (!tile || !tile.vol) return;
-  doorVoxels(dr, (x, y, z, c, l) => world.setV(x, y, z, c, l), (x, y, z) => world.getL(x, y, z));
-  city.indexDoorGaps();
-  const { gap, leaf } = doorCells(dr), cells = [...gap, ...leaf];
-  const x0 = Math.min(...cells.map(c => c[0])) - 2, y0 = Math.min(...cells.map(c => c[1])) - 2, x1 = Math.max(...cells.map(c => c[0])) + 2, y1 = Math.max(...cells.map(c => c[1])) + 2;
-  world.updateRegion(x0, y0, x1, y1);      // Höhe, Kollision, Wege; der Renderer backt den Bereich neu
-  fieldT = 0;
-}
+function applyDoor(dr) { city.applyDoor(dr); fieldT = 0; }
 function toggleDoor(dr) {
   if (dr.broken) return;
   if (dr.open) {   // nicht schließen, wenn jemand in der Tür steht
@@ -191,9 +184,9 @@ function hurtPlayer(dmg, dx, dy) {
 function randomFreeCell(minD, maxD) {
   const [x0, y0, x1, y1] = stream.bounds();
   for (let k = 0; k < 400; k++) {
-    const x = x0 + Math.random() * (x1 - x0), y = y0 + Math.random() * (y1 - y0), i = (y | 0) * W + (x | 0);
+    const x = x0 + Math.random() * (x1 - x0), y = y0 + Math.random() * (y1 - y0);
     const t = world.tileAt(x, y); if (!t || !t.vol) continue;
-    if (world.pathBlocked[i]) continue;
+    if (world.pathBlockedAt(x, y)) continue;
     const d = Math.hypot(x - P.x, y - P.y);
     if (d < minD || d > maxD) continue;
     if (d < 70 && world.los(P.x, P.y, x, y)) continue;
@@ -478,28 +471,30 @@ function drawOverlay(t, dt) {
 // ---- HUD und Minikarte (aus dem Stadtplan, ohne Voxel)
 const KCOL = { road: '#3a3c42', haus: '#8a5a3a', laden: '#3a7a8a', park: '#3a6a2a', parkplatz: '#5a5c60', brache: '#5a4a30' };
 let miniBase = null;
+const MS = 6;                    // Pixel pro Grundstück auf der Grundkarte; die Minikarte zeigt 16 × 16 Grundstücke um die Figur
 function buildMini() {
-  const c = document.createElement('canvas'); c.width = 96; c.height = 96; const g = c.getContext('2d');
-  const s = 96 / GN;
+  const c = document.createElement('canvas'); c.width = GN * MS; c.height = GN * MS; const g = c.getContext('2d');
   for (let ty = 0; ty < GN; ty++) for (let tx = 0; tx < GN; tx++) {
     const t = TILES[city.grid[ty * GN + tx]];
-    g.fillStyle = t.kind === 'road' ? '#1e2a1c' : KCOL[t.kind]; g.fillRect(tx * s, ty * s, s, s);
+    g.fillStyle = t.kind === 'road' ? '#1e2a1c' : KCOL[t.kind]; g.fillRect(tx * MS, ty * MS, MS, MS);
     if (t.kind === 'road') {
-      g.fillStyle = '#6a6c72'; const m = s / 2 - 1.2;
-      g.fillRect(tx * s + m, ty * s + m, 2.4, 2.4);
-      if (t.mask & 1) g.fillRect(tx * s + m, ty * s, 2.4, m); if (t.mask & 4) g.fillRect(tx * s + m, ty * s + m, 2.4, s - m);
-      if (t.mask & 8) g.fillRect(tx * s, ty * s + m, m, 2.4); if (t.mask & 2) g.fillRect(tx * s + m, ty * s + m, s - m, 2.4);
+      g.fillStyle = '#6a6c72'; const m = MS / 2 - 1;
+      g.fillRect(tx * MS + m, ty * MS + m, 2, 2);
+      if (t.mask & 1) g.fillRect(tx * MS + m, ty * MS, 2, m); if (t.mask & 4) g.fillRect(tx * MS + m, ty * MS + m, 2, MS - m);
+      if (t.mask & 8) g.fillRect(tx * MS, ty * MS + m, m, 2); if (t.mask & 2) g.fillRect(tx * MS + m, ty * MS + m, MS - m, 2);
     }
   }
   miniBase = c;
 }
 function drawMini() {
-  const m = $('mini'), c = m.getContext('2d'), k = 96 / W;
-  c.drawImage(miniBase, 0, 0);
+  const m = $('mini'), c = m.getContext('2d'), k = MS / TS;
+  const cx = P.x * k - 48, cy = P.y * k - 48;
+  c.fillStyle = '#000'; c.fillRect(0, 0, 96, 96);
+  c.drawImage(miniBase, -cx, -cy);
   c.fillStyle = '#e04030';
-  for (const z of zombies) if (!z.dead && z.state === 'chase') c.fillRect(z.x * k - 1, z.y * k - 1, 2, 2);
-  c.fillStyle = '#fff'; c.fillRect(P.x * k - 1.5, P.y * k - 1.5, 3, 3);
-  c.strokeStyle = '#fff'; c.beginPath(); c.moveTo(P.x * k, P.y * k); c.lineTo(P.x * k + Math.cos(P.aim) * 6, P.y * k + Math.sin(P.aim) * 6); c.stroke();
+  for (const z of zombies) if (!z.dead && z.state === 'chase') c.fillRect(z.x * k - cx - 1, z.y * k - cy - 1, 2, 2);
+  c.fillStyle = '#fff'; c.fillRect(46.5, 46.5, 3, 3);
+  c.strokeStyle = '#fff'; c.beginPath(); c.moveTo(48, 48); c.lineTo(48 + Math.cos(P.aim) * 6, 48 + Math.sin(P.aim) * 6); c.stroke();
   m.style.transform = `rotate(${cam.yaw}rad)`; m.style.borderRadius = '50%';
 }
 function drawHud() {
@@ -522,15 +517,17 @@ function drawHud() {
 // =====================================================================
 //  SPIELSCHLEIFE
 // =====================================================================
-let last = 0, hudT = 0;
+let last = 0, hudT = 0, last0 = 0;
+const frameTimes = [];   // echte Abstände zwischen Bildern (ms), für den Rundgang
 function step(now) {
   requestAnimationFrame(step);
   const dt = Math.min(0.05, (now - last) / 1000 || 0.016); last = now; const t = now / 1000;
   if (!running) return;
   frameAvg += (dt - frameAvg) * 0.05;
+  if (frameTimes.length < 20000) frameTimes.push(now - last0); last0 = now;
   if (frameAvg > 0.027) { slowT += dt; if (slowT > 2 && RS < 2.4) { RS *= 1.25; resize(); slowT = 0; frameAvg = 0.016; } } else slowT = 0;
   stream.update(P.x, P.y);
-  stream.run(6);
+  stream.run(6);                 // nur ohne Worker
 
   if (!paused) {
     gameTime += dt;
@@ -621,7 +618,8 @@ function showWfc() {
   let i = 0;
   const tick = () => {
     if (i >= city.order.length) return;
-    for (let k = 0; k < 3 && i < city.order.length; k++, i++) {
+    const per = Math.ceil(city.order.length / 120);
+    for (let k = 0; k < per && i < city.order.length; k++, i++) {
       const cell = city.order[i], t = TILES[city.grid[cell]];
       c.fillStyle = KCOL[t.kind]; c.fillRect(cell % GN, (cell / GN) | 0, 1, 1);
     }
@@ -633,25 +631,21 @@ function newGame(s) {
   seed = s; running = false;
   $('stTxt').textContent = `Stadt #${seed % 100000} – Wave Function Collapse …`;
   $('bPlay').disabled = true;
-  setTimeout(() => {
-    city = createCity(seed); world = city.world;
+  setTimeout(async () => {
+    if (city && city.backend.terminate) city.backend.terminate();
+    city = createCity(seed, { workers: params.has('ohneWorker') ? false : true }); world = city.world;
     R.attachWorld(world, 5);
-    stream = new Streamer(world, R, { radius: 2, keep: 3 });
-    field = new FlowField(world);
+    await city.whenReady();
+    stream = new Streamer(world, R, { backend: city.backend, radius: 2, keep: 3 });
+    field = new FlowField(world, 140);
     showWfc(); buildMini();
     P = newPlayer(); inv = []; addItem('bat', 1); addItem('pistol', 1); P.mags.pistol = 12; addItem('a9', 24); addItem('bandage', 1);
     P.weapon = 'pistol'; zombies = []; corpses = []; drops = []; parts.list.length = 0; kills = 0; gameTime = 0;
     cam.follow(P.x, P.y); cam.snap();
-    stream.update(P.x, P.y, true);
-    const total = stream.pending;
-    const work = () => {
-      stream.run(60);
-      if (stream.pending) { $('stTxt').textContent = `Baue Viertel: ${total - stream.pending} / ${total} Grundstücke …`; setTimeout(work, 0); return; }
-      if (!params.has('leer')) for (let k = 0; k < 55; k++) spawnZombie(60, 999);
-      $('stTxt').textContent = `Stadt #${seed % 100000}: ${GN}×${GN} Grundstücke (${Math.round(W / VPM)} m). Es ist Nacht. Finde Waffen und Vorräte – und überlebe.`;
-      $('bPlay').disabled = false;
-    };
-    work();
+    await stream.fill(P.x, P.y, (a, n) => { $('stTxt').textContent = `Baue Viertel: ${a} / ${n} Grundstücke …`; });
+    if (!params.has('leer')) for (let k = 0; k < 55; k++) spawnZombie(60, 999);
+    $('stTxt').textContent = `Stadt #${seed % 100000}: ${GN}×${GN} Grundstücke (${Math.round(W / VPM)} m). Es ist Nacht. Finde Waffen und Vorräte – und überlebe.`;
+    $('bPlay').disabled = false;
   }, 30);
 }
 function gameOver() {
@@ -679,4 +673,4 @@ requestAnimationFrame(step);
 // Für Tests und Debugging
 window.TS_DEBUG = { get P() { return P; }, get world() { return world; }, get city() { return city; }, get zombies() { return zombies; }, set zombies(v) { zombies = v; },
   get corpses() { return corpses; }, cam, R, get stream() { return stream; }, get frameAvg() { return frameAvg; }, interact, toggleDoor, applyDoor, fire,
-  get running() { return running; }, get gameTime() { return gameTime; }, highlights, doorCenter, nearestUsable };
+  get running() { return running; }, get gameTime() { return gameTime; }, highlights, doorCenter, nearestUsable, get frameTimes() { return frameTimes; } };

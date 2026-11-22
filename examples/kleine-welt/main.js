@@ -2,7 +2,7 @@
 // Zeigt: eigene Kachel-Generierung, Grundriss-Grammatik, freie Kamera, Tageszeit, ECS mit Flow Field,
 // und bleibende Änderungen (Deltas), die das Neubacken über Kachelgrenzen auslösen.
 import {
-  World, Renderer, Camera, Streamer, Particles, ECS, movementSystem, FlowField, Input,
+  World, Renderer, Camera, Streamer, LocalBackend, Particles, ECS, movementSystem, FlowField, Input,
   skyAt, flicker, nearestLights, planRooms, buildStack, C, E, FLAG, jit, shade, hash3, vnoise, ri, pick,
 } from '../../engine/index.js';
 
@@ -12,7 +12,7 @@ const TS = 48, N = 3, H = 32, WALL = 12, DOOR = 4;
 
 // ---------------------------------------------------------------- Welt
 const lamps = [], fires = [];
-function generate(tile, vol, { rng, ox, oy, first }) {
+function generate(tile, vol, { rng, ox, oy, add }) {
   const S = (x, y, z, c, l = 0) => { if (x >= 0 && y >= 0 && x < TS && y < TS) vol.set(x, y, z, c, l); };
   // Boden: Wiese mit Weg
   for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
@@ -30,7 +30,7 @@ function generate(tile, vol, { rng, ox, oy, first }) {
   const lamp = (x, y) => {
     for (let z = 1; z <= 14; z++) S(x, y, z, C(0x3a3c42));
     S(x, y, 15, E(0xffd9a0));
-    if (first) lamps.push({ x: ox + x + 0.5, y: oy + y + 0.5, z: 15, r: 40, c: [1, 0.75, 0.45], i: 1.4, type: 'lamp', seed: rng() * 100 });
+    add('lamp', { x: ox + x + 0.5, y: oy + y + 0.5, z: 15, r: 40, c: [1, 0.75, 0.45], i: 1.4, type: 'lamp', seed: rng() * 100 });
   };
   if (tile.tx === 1 && tile.ty === 1) {
     // Haus aus der Grundriss-Grammatik der Engine
@@ -49,23 +49,32 @@ function generate(tile, vol, { rng, ox, oy, first }) {
       for (let y = ay; y <= by; y++) for (let x = ax; x <= bx; x++)
         S(x, y, z, C(jit(0x7a3426, 0.2, hash3(x, y >> 1, z))), FLAG.ROOF);
     }
-    if (first) tile.data.house = { x0: ox + gx, y0: oy + gy, x1: ox + gx + w - 1, y1: oy + gy + d - 1 };
+    add('house', { x0: ox + gx, y0: oy + gy, x1: ox + gx + w - 1, y1: oy + gy + d - 1 });
   } else {
     for (let k = 0; k < 4; k++) { const x = ri(rng, 4, TS - 6), y = ri(rng, 4, TS - 6); if (Math.abs(ox + x - 72) > 6 && Math.abs(oy + y - 100) > 6) tree(x, y); }
     if (rng() < 0.5) lamp(ri(rng, 6, TS - 6), ri(rng, 6, TS - 6));
     if (tile.tx === 0 && tile.ty === 2) {   // Lagerfeuer
       for (let a = 0; a < 10; a++) S(24 + Math.round(Math.cos(a / 10 * 6.28) * 3), 24 + Math.round(Math.sin(a / 10 * 6.28) * 3), 1, C(0x6a6a66));
       S(24, 24, 1, E(0xff8a2a)); S(25, 24, 1, E(0xffb040));
-      if (first) fires.push({ x: ox + 24.5, y: oy + 24.5, z: 4, r: 55, c: [1, 0.55, 0.2], i: 2, type: 'fire', seed: 3 });
+      add('fire', { x: ox + 24.5, y: oy + 24.5, z: 4, r: 55, c: [1, 0.55, 0.2], i: 2, type: 'fire', seed: 3 });
     }
   }
 }
-const world = new World({ tileSize: TS, tilesX: N, tilesY: N, height: H, seed: 77, version: 1, generate });
+// Generator-Beschreibung wie für einen Worker; hier synchron über LocalBackend (die Welt ist klein)
+const GEN = { tileSize: TS, tilesX: N, tilesY: N, height: H, version: 1, generate };
+const world = new World({ tileSize: TS, tilesX: N, tilesY: N, height: H, seed: 77, version: 1 });
+const backend = new LocalBackend(GEN, 77);
+world.builder = backend.builder;
+world.on('entities', (t, list) => {
+  for (const { type, data } of list) {
+    if (type === 'lamp') lamps.push(data); else if (type === 'fire') fires.push(data); else if (type === 'house') t.data.house = data;
+  }
+});
 
 // ---------------------------------------------------------------- Darstellung
 const R = new Renderer($('gl'), { zMax: H + 2 });
 R.attachWorld(world, N);
-const stream = new Streamer(world, R, { radius: 1, keep: 2 });
+const stream = new Streamer(world, R, { backend, radius: 1, keep: 2 });
 const cam = new Camera({ x: 72, y: 72, zoom: 5, pitch: 0.9, yaw: 0.6, minZoom: 2, maxZoom: 16 });
 const parts = new Particles();
 const ov = $('ov'), octx = ov.getContext('2d');
@@ -75,7 +84,7 @@ function resize() {
   R.resize(w, h); ov.width = w; ov.height = h; cam.setSize(w, h);
 }
 addEventListener('resize', resize); resize();
-stream.update(72, 72, true); stream.run(1e9);
+stream.update(72, 72); stream.run(1e9);
 
 // Figur: einfache Kapselgestalt, 4-fache Dichte
 const cap = (u, v, s, ax, ay, az, bx, by, bz, r) => {

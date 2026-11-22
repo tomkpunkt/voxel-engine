@@ -1,14 +1,14 @@
 // Weltabfragen und Deltas (Abnahme Etappe 1)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { World } from '../engine/world/world.js';
+import { makeWorld, loadAll } from './hilfe.mjs';
 import { C, FLAG } from '../engine/core/voxel.js';
 
 /** Testwelt: 2 × 2 Kacheln à 16, Boden überall, eine Wand bei x = 20 (y 4…27), Dach über (2…6, 2…6). */
 function testWelt(seed = 1) {
   let gens = 0;
-  const w = new World({
-    tileSize: 16, tilesX: 2, tilesY: 2, height: 16, seed,
+  const w = makeWorld({
+    tileSize: 16, tilesX: 2, tilesY: 2, height: 16,
     generate: (tile, vol, { ox, oy, rng }) => {
       gens++;
       for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
@@ -18,8 +18,8 @@ function testWelt(seed = 1) {
         if (X >= 2 && X <= 6 && Y >= 2 && Y <= 6) vol.set(x, y, 9, C(0x803020), FLAG.ROOF);
       }
     },
-  });
-  for (let ty = 0; ty < 2; ty++) for (let tx = 0; tx < 2; tx++) w.ensure(tx, ty);
+  }, seed);
+  loadAll(w);
   return { w, gens: () => gens };
 }
 
@@ -30,8 +30,8 @@ test('Höhe, Kollision und Wegkarte', () => {
   assert.equal(w.height(4, 4), 0);              // Dach schwebt, keine zusammenhängende Säule ab z = 1
   assert.ok(w.isBlocked(20, 10));
   assert.ok(!w.isBlocked(4, 4), 'Dach blockiert nicht');
-  assert.ok(w.pathBlocked[10 * w.W + 19] && w.pathBlocked[10 * w.W + 21], 'Wegkarte ist um 1 verdickt');
-  assert.ok(!w.pathBlocked[10 * w.W + 18]);
+  assert.ok(w.pathBlockedAt(19, 10) && w.pathBlockedAt(21, 10), 'Wegkarte ist um 1 verdickt');
+  assert.ok(!w.pathBlockedAt(18, 10));
   assert.ok(w.isBlocked(-1, 5), 'außerhalb gilt als blockiert');
 });
 
@@ -63,8 +63,9 @@ test('Deltas überleben Entladen und Neuerzeugen', () => {
   const out = w.evict(99, 99, 0);
   assert.equal(out.length, 4);
   assert.equal(w.getC(5, 5, 0), 0, 'nicht geladen → leer');
+  w.builder.cache.clear();                     // auch der Cache des Builders ist weg (wie bei einem neuen Worker)
   const g0 = gens();
-  for (let ty = 0; ty < 2; ty++) for (let tx = 0; tx < 2; tx++) w.ensure(tx, ty);
+  loadAll(w);
   assert.equal(gens(), g0 + 4);
   assert.equal(w.getC(5, 5, 0), 0, 'Loch ist wieder da');
   assert.equal(w.getC(8, 8, 4), C(0xff0000), 'neuer Voxel ist wieder da');
@@ -88,8 +89,10 @@ test('Spielstand: export → import rekonstruiert die Welt, falsche Saat wird ab
   const save = JSON.parse(JSON.stringify(a.exportDeltas()));
   const b = testWelt(3).w;
   b.importDeltas(save);
+  assert.equal(b.getC(5, 5, 0), 0, 'Import entlädt betroffene Kacheln');
+  loadAll(b);
   for (const [x, y, z] of [[1, 1, 0], [30, 30, 2], [5, 5, 0]]) assert.equal(b.getC(x, y, z), a.getC(x, y, z));
-  assert.equal(b.tileOf(0, 0).rev, a.tileOf(0, 0).rev);
+  assert.ok(b.tileOf(0, 0).rev > a.tileOf(0, 0).rev - 1, "Revision mindestens so hoch wie im Spielstand (laufende Aufträge werden ungültig)");
   assert.equal(b.height(30, 30), 0, 'schwebender Voxel bei z 2 ändert die Säule ab z 1 nicht');
   assert.throws(() => testWelt(4).w.importDeltas(save), /passt nicht/);
 });
