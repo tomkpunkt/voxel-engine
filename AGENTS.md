@@ -1,7 +1,7 @@
 # Regeln für Agenten und Mitwirkende
 
 - **Sprache**: Doku, Kommentare, Commit-Nachrichten und Oberflächentexte auf Deutsch.
-- **Kein Build-Schritt**: nur ES-Module mit relativen Imports, die direkt im Browser laufen. Keine Abhängigkeiten aus npm im Engine-Code.
+- **Kein Build-Schritt**: nur ES-Module mit relativen Imports, die direkt im Browser laufen. Keine Abhängigkeiten aus npm im Engine-Code. Ausnahme: Rapier.js für Ragdolls, optional per `import()` vom CDN, immer mit dem eigenen Verlet-Ragdoll als Ersatz.
 - **DOM-frei, wo möglich**: `core/`, `world/`, `gen/`, `ecs/`, `light/`, `render/bake.js`, `render/camera.js` dürfen weder `document` noch `window` beim Import anfassen – sie werden in Node getestet und sollen später in Workern laufen.
 - **Engine vs. Spiel**: Spielregeln, KI-Verhalten, Inventar, Inhalte gehören nach `games/<spiel>/`. Die Engine kennt keine Türen, Waffen oder Zombies. Spielspezifische Voxel-Flags ab `FLAG.GAME0`.
 - **Reproduzierbarkeit**: Kachelinhalte hängen nur von Welt-Saat, Kachellage und Generatorversion ab (`tileSeed`). Bleibende Änderungen nur über `world.edit()` (Deltas). Ändert sich ein Generator so, dass alte Spielstände nicht mehr passen, Generatorversion erhöhen.

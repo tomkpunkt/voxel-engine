@@ -10,7 +10,7 @@
 // Kachel (tx, ty) belegt den Platz (tx mod win, ty mod win). Instanzen tragen Welt- und Texturposition getrennt,
 // darum muss beim Wandern nichts umkopiert werden.
 import { VS_G, FS_G, VS_L, FS_L, FS_SLOT, FS_SUN } from './shaders.js';
-import { bakeBox, bakeBricks, chunkBounds, CHUNK, DEFAULT_SUN } from './bake.js';
+import { bakeBox, bakeRegion, bakeBricks, chunkBounds, CHUNK, DEFAULT_SUN } from './bake.js';
 import { MAX_LIGHTS, TILE, PER_TILE, binLights } from '../light/light.js';
 
 const MAX_INST = 120000;
@@ -299,6 +299,46 @@ export class Renderer {
     const used = vols.map(v => { const u = new Array(h).fill(false); for (let z = 0; z < h; z++) for (let k = z * w * d; k < (z + 1) * w * d; k++) if (v.data[k]) { u[z] = true; break; } return u; });
     return { w, d, h, n: vols.length, used, A: this.texArray(w, d, h * vols.length, A), B: this.texArray(w, d, h * vols.length, B) };
   }
+
+  /** Raster { w, d, h, c, l } backen (für Ragdolls). Liefert A, B und used. */
+  bakeGrid(g, A, B, h = g.h) {
+    const { w, d } = g, n = w * d;
+    const get = (x, y, z) => x < 0 || y < 0 || z < 0 || x >= w || y >= d || z >= g.h ? 0 : g.c[(z * d + y) * w + x];
+    const lay = (x, y, z) => g.l[(z * d + y) * w + x];
+    bakeBox(get, lay, 0, 0, w, d, h, false, A, B, this.sun);
+    const used = new Array(g.h).fill(false);
+    for (let z = 0; z < h; z++) for (let k = z * n; k < (z + 1) * n; k++) if (g.c[k]) { used[z] = true; break; }
+    return used;
+  }
+  /** Fester Sprite aus einem Raster (ein Bild). */
+  spriteFromGrid(g) {
+    const n = g.w * g.d * g.h * 4, A = new Uint8Array(n), B = new Uint8Array(n);
+    const used = this.bakeGrid(g, A, B);
+    return { w: g.w, d: g.d, h: g.h, n: 1, used: [used], A: this.texArray(g.w, g.d, g.h, A), B: this.texArray(g.w, g.d, g.h, B) };
+  }
+  /** Veränderlicher Sprite fester Größe; Inhalt mit updateSprite. */
+  createDynamicSprite(w, d, h) {
+    const n = w * d * h * 4;
+    return { w, d, h, n: 1, used: [new Array(h).fill(false)], A: this.texArray(w, d, h, null), B: this.texArray(w, d, h, null),
+      bufA: new Uint8Array(n), bufB: new Uint8Array(n), dyn: true };
+  }
+  /**
+   * Raster gleicher Größe in einen veränderlichen Sprite backen. b = { x0, x1, y0, y1, zTop } (belegter Bereich,
+   * z. B. aus RagdollModel.voxelize) begrenzt die Arbeit.
+   */
+  updateSprite(spr, g, b = { x0: 0, x1: g.w, y0: 0, y1: g.d, zTop: g.h }) {
+    const gl = this.gl, h = Math.min(spr.h, Math.max((spr.zTop || 0), b.zTop, 1)), m = spr.w * spr.d * h * 4, n = g.w * g.d;
+    spr.bufA.fill(0, 0, m); spr.zTop = b.zTop;
+    const get = (x, y, z) => x < 0 || y < 0 || z < 0 || x >= g.w || y >= g.d || z >= g.h ? 0 : g.c[(z * g.d + y) * g.w + x];
+    if (b.x1 > b.x0) bakeRegion(get, (x, y, z) => g.l[(z * g.d + y) * g.w + x], g.w, g.d, b.x0, b.x1, b.y0, b.y1, Math.min(b.zTop, g.h), spr.bufA, spr.bufB, this.sun);
+    const used = spr.used[0];
+    for (let z = 0; z < spr.h; z++) { used[z] = false; if (z < b.zTop) for (let k = z * n; k < (z + 1) * n; k++) if (g.c[k]) { used[z] = true; break; } }
+    for (const [T, buf] of [[spr.A, spr.bufA], [spr.B, spr.bufB]]) {
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, T);
+      gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, 0, spr.w, spr.d, h, gl.RGBA, gl.UNSIGNED_BYTE, buf.subarray(0, m));
+    }
+  }
+  deleteSprite(spr) { this.gl.deleteTexture(spr.A); this.gl.deleteTexture(spr.B); }
 
   // ---------------------------------------------------------------- Bild
   begin(camera) {

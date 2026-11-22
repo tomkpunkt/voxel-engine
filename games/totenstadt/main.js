@@ -18,6 +18,7 @@ import { TILES, doorCells, doorCenter } from './city.js';
 import { createCity } from './stadt.js';
 import { SD, survivorFn, zombieFn, figureStack, flameStack, WALK } from './models.js';
 import { WEAP, ITEMS, rollLoot } from './data.js';
+import { Leichen } from './leichen.js';
 
 const $ = id => document.getElementById(id);
 const glc = $('gl'), ov = $('ov'), octx = ov.getContext('2d');
@@ -117,12 +118,14 @@ function hurtZombie(z, dmg, dx, dy, x, y) {
   for (let k = 0; k < 3; k++) decal(z.x + (Math.random() - 0.5) * 4, z.y + (Math.random() - 0.5) * 4, [80, 10, 8], 0.5);
   SND.hit(volAt(x, y));
   if (z.state !== 'chase') { z.state = 'chase'; z.lastSeen = gameTime; }
-  if (z.hp <= 0) killZombie(z, dx, dy);
+  if (z.hp <= 0) killZombie(z, dx, dy, dmg);
 }
-function killZombie(z, dx, dy) {
+function killZombie(z, dx, dy, dmg = 1) {
   z.dead = true; kills++;
-  corpses.push({ x: z.x + dx, y: z.y + dy, rot: Math.atan2(dy, dx) + Math.PI, v: z.v, t: gameTime });
-  if (corpses.length > 45) corpses.shift();
+  const k = { x: z.x + dx, y: z.y + dy, rot: Math.atan2(dy, dx) + Math.PI, v: z.v, t: gameTime };
+  leichen.spawn(k, z, dx, dy, Math.min(3, dmg));   // Ragdoll, wenn die Physik bereit ist; sonst liegende Figur
+  corpses.push(k);
+  if (corpses.length > 45) leichen.drop(corpses.shift());
   for (let k = 0; k < 22; k++) decal(z.x + (Math.random() - 0.5) * 6, z.y + (Math.random() - 0.5) * 6, [70, 8, 6], 0.7);
   const loot = rollLoot('zombie');
   if (loot.length) drops.push({ x: z.x, y: z.y, name: 'Leiche', items: loot });
@@ -455,7 +458,9 @@ function render(t) {
   }
   for (const k of corpses) {
     if (!cam.onScreen(k.x, k.y, 80)) continue;
-    R.drawSprite(TZ[k.v], 5, k.x, k.y, k.rot, { dens: SD, z: 0.6, shadow: 1, ent: 2, tint: [0.25, 0.05, 0.03, 0.25], hi: Math.hypot(k.x - P.x, k.y - P.y) < 9 ? 0.5 : 0 });
+    const o = { dens: SD, shadow: 1, ent: 2, tint: [0.25, 0.05, 0.03, 0.25], hi: Math.hypot(k.x - P.x, k.y - P.y) < 9 ? 0.5 : 0 };
+    if (k.spr) R.drawSprite(k.spr, 0, k.x, k.y, 0, { ...o, z: k.z });
+    else R.drawSprite(TZ[k.v], 5, k.x, k.y, k.rot, { ...o, z: 0.6 });
   }
   R.drawDebris(debris.list);
   for (const f of city.flames) {
@@ -634,6 +639,7 @@ function step(now) {
     if (zombies.length < want && Math.random() < dt * (zombies.length < want * 0.6 ? 12 : 2)) spawnZombie(70, 220);
     parts.update(dt, p => decal(p.x, p.y, [90, 12, 10], 0.65));
     debris.update(dt); debris.commit();
+    prof.begin('Ragdoll'); leichen.update(dt); prof.end('Ragdoll');
     nextBolt -= dt;
     if (nextBolt <= 0) { flash = 1; nextBolt = 20 + Math.random() * 30; thunderT = 0.8 + Math.random() * 1.5; }
     flash = Math.max(0, flash - dt * 2.2); if (flash < 0.6 && flash > 0.5 && Math.random() < 0.1) flash = 0.9;
@@ -690,6 +696,8 @@ function newGame(s) {
     await city.whenReady();
     stream = new Streamer(world, R, { backend: city.backend, radius: 2, keep: 3 });
     field = new FlowField(world, 140);
+    if (corpses) for (const k of corpses) leichen.drop(k);
+    leichen.attach(world);
     debris = new Debris(world, { max: 1500 });
     showWfc(); buildMini();
     P = newPlayer(); inv = []; addItem('bat', 1); addItem('pistol', 1); P.mags.pistol = 12; addItem('a9', 24); addItem('bandage', 1);
@@ -714,7 +722,7 @@ function snapshot() {
   for (const c of city.containers) if (c.items) containers[c.id] = c.items;
   return { format: 1, seed, gameTime, kills, world: world.exportDeltas(), containers,
     player: { x: P.x, y: P.y, hp: P.hp, bat: P.bat, st: P.st, light: P.light, weapon: P.weapon, mags: P.mags, aim: P.aim },
-    inv, drops: drops.map(d => ({ x: d.x, y: d.y, name: d.name, items: d.items })), corpses: corpses.map(k => ({ x: k.x, y: k.y, rot: k.rot, v: k.v })) };
+    inv, drops: drops.map(d => ({ x: d.x, y: d.y, name: d.name, items: d.items })), corpses: corpses.map(k => leichen.save(k)) };
 }
 async function save(quiet) {
   if (!running || !P || P.hp <= 0) return;
@@ -729,7 +737,7 @@ async function continueGame() {
 }
 function applySaveAfterLoad(sv) {
   Object.assign(P, sv.player); P.rot = P.aim; inv = sv.inv; gameTime = sv.gameTime; kills = sv.kills;
-  drops = sv.drops; corpses = sv.corpses.map(k => ({ ...k, t: 0 }));
+  drops = sv.drops; corpses = sv.corpses.map(k => leichen.load(k));
   $('tbLight').classList.toggle('on', P.light);
   cam.follow(P.x, P.y); cam.snap();
 }
@@ -755,6 +763,7 @@ TPG = R.createSprite(WALK.map(s => figureStack(survivorFn(s, false), 36, 44)));
 TPM = R.createSprite(WALK.map(s => figureStack(survivorFn(s, true), 36, 44)));
 for (let v = 0; v < 3; v++) TZ.push(R.createSprite([...WALK.map(s => figureStack(zombieFn(s, v * 2 + 1, false), 48, 40)), figureStack(zombieFn(0, v * 2 + 1, true), 48, 40, true)]));
 TFL = R.createSprite([0, 1, 2, 3, 4, 5].map(flameStack));
+const leichen = new Leichen(R, params.get('ragdoll') || 'auto');   // ?ragdoll=rapier|verlet|aus
 resize();
 newGame(seed);
 requestAnimationFrame(step);
@@ -762,4 +771,4 @@ requestAnimationFrame(step);
 // Für Tests und Debugging
 window.TS_DEBUG = { get P() { return P; }, get world() { return world; }, get city() { return city; }, get zombies() { return zombies; }, set zombies(v) { zombies = v; },
   get corpses() { return corpses; }, cam, R, get debris() { return debris; }, chip, get stream() { return stream; }, get frameAvg() { return frameAvg; }, interact, toggleDoor, applyDoor, fire,
-  get running() { return running; }, save, continueGame, snapshot, prof, get gameTime() { return gameTime; }, highlights, doorCenter, nearestUsable, get frameTimes() { return frameTimes; } };
+  get running() { return running; }, leichen, killZombie, save, continueGame, snapshot, prof, get gameTime() { return gameTime; }, highlights, doorCenter, nearestUsable, get frameTimes() { return frameTimes; } };
