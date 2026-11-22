@@ -94,3 +94,26 @@ export function sliceBounds(col, w, d, h) {
   }
   return bb;
 }
+
+/** Kantenlänge der Zeichen-Teilstücke (Gitter-Culling) in Blöcken. */
+export const CHUNK = 16;
+/**
+ * Belegte Rechtecke je Teilstück (CHUNK × CHUNK) und Höhe einer Kachel, für Gitter-Culling.
+ * Layout: pro Teilstück c = cy·n + cx ein Block aus 1 + 4·h Werten: [oberste Höhe + 1, dann je z: x0, y0, x1, y1 (−1 = leer)]
+ * in Kachelkoordinaten. n = ceil(w / CHUNK).
+ */
+export function chunkBounds(data, w, d, h, CH = CHUNK) {
+  const n = Math.ceil(w / CH), m = Math.ceil(d / CH), S = 1 + 4 * h, out = new Int16Array(n * m * S).fill(-1);
+  for (let c = 0; c < n * m; c++) out[c * S] = 0;
+  for (let z = 0; z < h; z++) for (let y = 0; y < d; y++) {
+    const cy = (y / CH) | 0, row = (z * d + y) * w;
+    for (let x = 0; x < w; x++) {
+      if (!data[row + x]) continue;
+      const c = cy * n + ((x / CH) | 0), b = c * S, k = b + 1 + z * 4;
+      if (out[b] < z + 1) out[b] = z + 1;
+      if (out[k] < 0) { out[k] = x; out[k + 1] = y; out[k + 2] = x; out[k + 3] = y; }
+      else { if (x < out[k]) out[k] = x; if (y < out[k + 1]) out[k + 1] = y; if (x > out[k + 2]) out[k + 2] = x; if (y > out[k + 3]) out[k + 3] = y; }
+    }
+  }
+  return out;
+}

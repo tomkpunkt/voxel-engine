@@ -152,10 +152,10 @@ function step(now) {
     R.drawSprite(w.spr, w.walk > 0 ? 1 + (Math.floor(w.walk / 2.4) % 4) : 0, pos.x, pos.y, w.rot, { dens, shadow: 1, xray: true });
     if (sky.night > 0.4) lights.push({ x: pos.x, y: pos.y, z: M(1.2), r: M(4.4), color: [0.9, 0.7, 0.4] });
   }
-  for (const Lt of nearestLights([...fires, ...(sky.night > 0.3 ? lamps : [])], cam.x, cam.y, 8 - lights.length, M(40))) {
+  for (const Lt of nearestLights([...fires, ...(sky.night > 0.3 ? lamps : [])], cam.x, cam.y, 64, M(40))) {
     const f = flicker(Lt, t) * Lt.i; lights.push({ x: Lt.x, y: Lt.y, z: Lt.z, r: Lt.r, color: Lt.c.map(c => c * f) });
   }
-  R.light({ ambient: sky.ambient, sunColor: sky.sun, lights, eye: [cam.x, cam.y, M(1.8)], los: false, quant: 28, time: t });
+  R.light({ ambient: sky.ambient, sunColor: sky.sun, sunDir: sky.night < 0.6 ? sky.dir : null, lights, eye: [cam.x, cam.y, M(1.8)], los: false, quant: 28, time: t });
   octx.clearRect(0, 0, ov.width, ov.height);
   parts.draw(octx, cam);
   $('zeitTxt').textContent = `${String(Math.floor(hour)).padStart(2, '0')}:${String(Math.round(hour % 1 * 60)).padStart(2, '0')}`;

@@ -19,7 +19,7 @@
 
 import { Volume } from '../core/voxel.js';
 import { mulberry32, tileSeed } from '../core/rand.js';
-import { bakeBox, bakeBricks, sliceBounds } from '../render/bake.js';
+import { bakeBox, bakeBricks, chunkBounds } from '../render/bake.js';
 import { columnInfo, defaultBlocks } from '../world/world.js';
 
 export class Builder {
@@ -90,8 +90,8 @@ export class Builder {
   }
   maps(c) {
     const TS = this.TS, ox = c.tx * TS, oy = c.ty * TS;
-    c.colH = new Uint8Array(TS * TS); c.blocked = new Uint8Array(TS * TS);
-    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) columnInfo(c.vol, x, y, this.H, this.blocks, this.blockZ, ox + x, oy + y, c.colH, c.blocked, y * TS + x);
+    c.colH = new Uint8Array(TS * TS); c.blocked = new Uint8Array(TS * TS); c.colTop = new Uint8Array(TS * TS);
+    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) columnInfo(c.vol, x, y, this.H, this.blocks, this.blockZ, ox + x, oy + y, c.colH, c.blocked, y * TS + x, c.colTop);
   }
   /**
    * Auftrag ausführen. req = { tx, ty, rev, tiles: [{tx, ty, rev, state, deltas}], bake, entities }
@@ -107,12 +107,12 @@ export class Builder {
       for (let dy = -1; dy <= 1 && !b; dy++) for (let dx = -1; dx <= 1; dx++) if (this.blockedAt(ox + x + dx, oy + y + dy)) { b = 1; break; }
       path[y * TS + x] = b;
     }
-    const out = { tx: req.tx, ty: req.ty, rev: req.rev, vol: pack ? c.vol.pack(true) : copyVolume(c.vol), colH: c.colH.slice(), blocked: c.blocked.slice(), path };
+    const out = { tx: req.tx, ty: req.ty, rev: req.rev, vol: pack ? c.vol.pack(true) : copyVolume(c.vol), colH: c.colH.slice(), colTop: c.colTop.slice(), blocked: c.blocked.slice(), path };
     if (req.entities) out.entities = c.entities;
     if (req.bake) {
       const t0 = now(), n = TS * TS * H * 4, A = new Uint8Array(n), B = new Uint8Array(n);
       bakeBox((x, y, z) => this.getC(x, y, z), (x, y, z) => this.getL(x, y, z), ox, oy, TS, TS, H, true, A, B, this.sun);
-      out.A = A; out.B = B; out.bb = sliceBounds(c.vol.data, TS, TS, H);
+      out.A = A; out.B = B; out.bb = chunkBounds(c.vol.data, TS, TS, H);
       if (c.vol.bricks.size) {
         const keys = Uint32Array.from(c.vol.bricks.keys());
         const bb = bakeBricks((x, y, z) => this.getFine(x, y, z), (x, y, z) => this.getFineLay(x, y, z), (x, y, z) => this.getC(x, y, z), [...keys], TS, ox, oy, H, this.S, this.sun);
@@ -129,7 +129,7 @@ const now = () => (typeof performance !== 'undefined' ? performance.now() : Date
 
 /** Übertragbare Puffer eines gepackten Ergebnisses (für postMessage). */
 export function transferList(r) {
-  const l = [r.vol.data.buffer, r.vol.palC.buffer, r.vol.palL.buffer, r.vol.bKeys.buffer, r.vol.bData.buffer, r.colH.buffer, r.blocked.buffer, r.path.buffer];
+  const l = [r.vol.data.buffer, r.vol.palC.buffer, r.vol.palL.buffer, r.vol.bKeys.buffer, r.vol.bData.buffer, r.colH.buffer, r.colTop.buffer, r.blocked.buffer, r.path.buffer];
   if (r.A) l.push(r.A.buffer, r.B.buffer, r.bb.buffer);
   if (r.bricks) l.push(r.bricks.keys.buffer, r.bricks.A.buffer, r.bricks.B.buffer);
   return l;

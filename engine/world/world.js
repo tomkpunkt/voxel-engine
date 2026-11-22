@@ -56,7 +56,7 @@ export class World {
     const key = this.key(tx, ty);
     let t = this.grid[key];
     if (!t) {
-      t = { key, tx, ty, vol: null, colH: null, blocked: null, path: null, rev: 0, deltas: new Map(), brickDeltas: new Map(), state: null, data: {}, decals: [], generated: false };
+      t = { key, tx, ty, vol: null, colH: null, colTop: null, blocked: null, path: null, rev: 0, deltas: new Map(), brickDeltas: new Map(), state: null, data: {}, decals: [], generated: false };
       this.grid[key] = t; this.tiles.set(key, t);
     }
     return t;
@@ -71,12 +71,12 @@ export class World {
 
   /**
    * Ergebnis eines Builders übernehmen (Volumen, Karten, Entities). Liefert false, wenn die Revision veraltet ist.
-   * r = { tx, ty, rev, vol: Volume, colH, blocked, path, entities }
+   * r = { tx, ty, rev, vol: Volume, colH, colTop, blocked, path, entities }
    */
   install(r) {
     const t = this.record(r.tx, r.ty);
     if (r.rev !== t.rev) return false;
-    t.vol = r.vol; t.colH = r.colH; t.blocked = r.blocked; t.path = r.path;
+    t.vol = r.vol; t.colH = r.colH; t.colTop = r.colTop; t.blocked = r.blocked; t.path = r.path;
     if (!t.generated) { t.generated = true; this.emit('entities', t, r.entities || []); }
     // Wegkarte an den Rändern der Nachbarn hängt von dieser Kachel ab
     const TS = this.TS, ox = r.tx * TS, oy = r.ty * TS;
@@ -110,7 +110,7 @@ export class World {
   evict(ctx, cty, keep) {
     const out = [];
     for (const t of this.tiles.values()) if (t.vol && (Math.abs(t.tx - ctx) > keep || Math.abs(t.ty - cty) > keep)) {
-      t.vol = null; t.colH = null; t.blocked = null; t.path = null; out.push(t);
+      t.vol = null; t.colH = null; t.colTop = null; t.blocked = null; t.path = null; out.push(t);
       this.emit('tileUnloaded', t);
     }
     return out;
@@ -189,7 +189,7 @@ export class World {
   updateColumn(x, y) {
     const t = this.tileAt(x, y); if (!t || !t.vol) return;
     const i = (y % this.TS) * this.TS + (x % this.TS);
-    columnInfo(t.vol, x % this.TS, y % this.TS, this.H, this.blocks, this.blockZ, x, y, t.colH, t.blocked, i);
+    columnInfo(t.vol, x % this.TS, y % this.TS, this.H, this.blocks, this.blockZ, x, y, t.colH, t.blocked, i, t.colTop);
   }
   /** Verdickung um eine Zelle (8 Nachbarn): ein Kreis mit Radius ≤ 1,2 passt durch jede Lücke ≥ 3. */
   updatePath(x0, y0, x1, y1) {
@@ -210,6 +210,11 @@ export class World {
 
   // ---------------------------------------------------------------- Abfragen
   /** Höhe der Säule ab z = 1 (+1), 0 = frei oder nicht geladen. */
+  /** Oberste belegte Höhe (+1) einer Säule, auch über Lücken hinweg. */
+  topHeight(x, y) {
+    const t = this.tileAt(x, y); if (!t || !t.colTop) return 0;
+    const TS = this.TS; return t.colTop[((y | 0) % TS) * TS + ((x | 0) % TS)];
+  }
   height(x, y) {
     const t = this.tileAt(x, y); if (!t || !t.colH) return 0;
     const TS = this.TS; return t.colH[((y | 0) % TS) * TS + ((x | 0) % TS)];
@@ -272,16 +277,21 @@ export class World {
       t.rev = Math.max(t.rev, e.rev) + 1; t.state = e.state ?? t.state;
       for (const [i, c, l, rev] of e.d) t.deltas.set(i, { c, l, rev });
       for (const [i, c, l] of e.b || []) t.brickDeltas.set(i, { c, l });
-      if (t.vol) { t.vol = null; t.colH = t.blocked = t.path = null; this.emit('tileUnloaded', t); }
+      if (t.vol) { t.vol = null; t.colH = t.colTop = t.blocked = t.path = null; this.emit('tileUnloaded', t); }
     }
   }
 }
 
 /** Säulenhöhe und Kollision einer Spalte (gemeinsam für Welt und Builder). */
-export function columnInfo(vol, lx, ly, H, blocks, blockZ, x, y, colH, blocked, i) {
+export function columnInfo(vol, lx, ly, H, blocks, blockZ, x, y, colH, blocked, i, colTop) {
   let h = 0;
   for (let z = 1; z < H; z++) { if (!vol.palC[vol.data[vol.idx(lx, ly, z)]]) break; h = z; }
   colH[i] = h ? h + 1 : 0;
+  if (colTop) {   // oberster belegter Block (+1), auch über Lücken: für Schatten des Hauptlichts (Baumkronen, Dächer)
+    let top = 0;
+    for (let z = H - 1; z >= 1; z--) if (vol.palC[vol.data[vol.idx(lx, ly, z)]]) { top = z + 1; break; }
+    colTop[i] = top;
+  }
   let b = 0;
   for (let z = blockZ[0]; z <= blockZ[1]; z++) {
     const p = vol.data[vol.idx(lx, ly, z)];

@@ -30,12 +30,18 @@ export function createCity(seed, o = {}) {
   };
 
   // Entities kommen genau einmal pro Kachel (beim ersten Erzeugen)
+  city.savedContainers = null;    // beim Laden: Behälter-Inhalte nach id
   world.on('entities', (t, list) => {
     t.data.buildings = []; t.data.doors = [];
+    let nc = 0;
     for (const { type: kind, data } of list) {
       const d = { ...data, tile: t.key };
       if (kind === 'light') city.lights.push(d);
-      else if (kind === 'cont') { d.items = null; city.containers.push(d); }
+      else if (kind === 'cont') {
+        d.id = t.key + ':' + (nc++);                         // stabil: gleiche Saat und Version → gleiche Reihenfolge
+        d.items = city.savedContainers && city.savedContainers[d.id] !== undefined ? city.savedContainers[d.id] : null;
+        city.containers.push(d);
+      }
       else if (kind === 'flame') city.flames.push(d);
       else if (kind === 'door') { city.doors.push(d); t.data.doors[d.idx] = d; }
       else if (kind === 'building') { d.index = city.buildings.length; city.buildings.push(d); t.data.buildings.push(d); }

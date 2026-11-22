@@ -9,11 +9,11 @@
 // Die Welt liegt als Fenster aus win × win Kacheln auf der GPU (zwei RGBA8-Textur-Arrays A und B).
 // Kachel (tx, ty) belegt den Platz (tx mod win, ty mod win). Instanzen tragen Welt- und Texturposition getrennt,
 // darum muss beim Wandern nichts umkopiert werden.
-import { VS_G, FS_G, VS_L, FS_L } from './shaders.js';
-import { bakeBox, bakeBricks, sliceBounds, DEFAULT_SUN } from './bake.js';
-import { MAX_LIGHTS } from '../light/light.js';
+import { VS_G, FS_G, VS_L, FS_L, FS_SLOT, FS_SUN } from './shaders.js';
+import { bakeBox, bakeBricks, chunkBounds, CHUNK, DEFAULT_SUN } from './bake.js';
+import { MAX_LIGHTS, TILE, PER_TILE, binLights } from '../light/light.js';
 
-const MAX_INST = 30000;
+const MAX_INST = 120000;
 
 export class Renderer {
   /**
@@ -31,7 +31,14 @@ export class Renderer {
     this.sun = o.sun ?? DEFAULT_SUN;
     this.PG = this.program(VS_G, FS_G); this.PL = this.program(VS_L, FS_L);
     gl.useProgram(this.PG.p); gl.uniform1i(this.PG.u.uA, 0); gl.uniform1i(this.PG.u.uB, 1);
-    gl.useProgram(this.PL.p); ['tA', 'tN', 'tX', 'tG', 'tH'].forEach((k, i) => gl.uniform1i(this.PL.u[k], i));
+    gl.useProgram(this.PL.p); ['tA', 'tN', 'tX', 'tG', 'tH', 'tL', 'tT', 'tI', 'tS', 'tSun'].forEach((k, i) => gl.uniform1i(this.PL.u[k], i));
+    // Schwellen-Atlas für Sicht und Lichtschatten (4 × 4 Plätze à 256²) und Sonnenschwellen (pro Fenster)
+    this.PS = this.program(VS_L, FS_SLOT); this.PSun = this.program(VS_L, FS_SUN);
+    gl.useProgram(this.PS.p); gl.uniform1i(this.PS.u.tH, 0); gl.useProgram(this.PSun.p); gl.uniform1i(this.PSun.u.tH, 0);
+    this.ATL = 1024; this.tS = this.r8Target(this.ATL, this.ATL, false); this.slots = new Float32Array(64);
+    // Lichtdaten als Float-Texturen (WebGL2 darf RGBA32F/R32F mit NEAREST lesen)
+    this.tL = this.floatTex(MAX_LIGHTS * 2, 1, 4); this.LD = new Float32Array(MAX_LIGHTS * 8);
+    this.tT = null; this.tI = this.floatTex(1024, 16, 1); this.tIrows = 16;
     this.vao = gl.createVertexArray(); gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
@@ -42,7 +49,6 @@ export class Renderer {
     this.vaoL = gl.createVertexArray();
     this.INST = new Float32Array(8 * MAX_INST);
     this.HIR = new Float32Array(24); this.HIZ = new Float32Array(24); this.HI0 = new Float32Array(24);
-    this.LP = new Float32Array(4 * MAX_LIGHTS); this.LC = new Float32Array(4 * MAX_LIGHTS);
     this.stats = { insts: 0, calls: 0 };
     this.fbo = null; this.gtex = []; this.depthRb = null;
     this.world = null;
@@ -62,6 +68,26 @@ export class Renderer {
     const u = {}, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
     for (let i = 0; i < n; i++) { const info = gl.getActiveUniform(p, i); u[info.name.replace('[0]', '')] = gl.getUniformLocation(p, info.name); }
     return { p, u };
+  }
+  /** R8-Ziel mit linearer Filterung (für Schwellen), mit eigenem Framebuffer. */
+  r8Target(w, h, repeat) {
+    const gl = this.gl, t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    const wr = repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wr); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wr);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, w, h);
+    t.fbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return t;
+  }
+  floatTex(w, h, ch) {
+    const gl = this.gl, t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, ch === 4 ? gl.RGBA32F : gl.R32F, w, h);
+    t.w = w; t.h = h; t.ch = ch;
+    return t;
   }
   texArray(w, d, layers, data) {
     const gl = this.gl, t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);
@@ -102,11 +128,13 @@ export class Renderer {
     this.slotOwner = new Int32Array(win * win).fill(-1);
     // Höhenkarte nur für das Fenster, gleiche Plätze wie die Voxel; REPEAT adressiert über Weltkoordinaten mod WIN
     this.hTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, this.hTex);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, this.WIN, this.WIN);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG8, this.WIN, this.WIN);      // R: Säule ab z = 1, G: oberste Höhe
     for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.REPEAT], [gl.TEXTURE_WRAP_T, gl.REPEAT]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.WIN, this.WIN, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(this.WIN * this.WIN));
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.WIN, this.WIN, gl.RG, gl.UNSIGNED_BYTE, new Uint8Array(this.WIN * this.WIN * 2));
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    if (this.tSun) gl.deleteTexture(this.tSun);
+    this.tSun = this.r8Target(this.WIN, this.WIN, true); this.sunKey = '';
     world.on('regionChanged', (x0, y0, x1, y1) => {
       this.uploadHeight(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
       this.rebake(x0 - 1, y0 - 1, x1 + 1, y1 + 1);    // 1 Voxel Rand: Normalen und Verdeckung der Nachbarn ändern sich mit
@@ -153,20 +181,21 @@ export class Renderer {
   /** Liegt die Kachel aktuell gebacken auf der GPU? */
   resident(t) { return !!t && !!t.gpu && this.slotOwner[this.slotOf(t.tx, t.ty)] === t.key; }
   /** Speicher auf der GPU in Byte (Welt-Fenster und Höhenkarte). */
-  gpuBytes() { return this.WIN * this.WIN * this.world.H * 8 + this.WIN * this.WIN; }
+  gpuBytes() { return this.WIN * this.WIN * this.world.H * 8 + this.WIN * this.WIN * 2 + (this.ATW ? this.ATW * this.ATW * this.world.sub * 8 : 0); }
 
   /** Höhen eines Weltrechtecks in den Fensterplatz ihrer Kachel laden (nur für Kacheln, die dort liegen). */
   uploadHeight(x0, y0, w, d) {
     const world = this.world, gl = this.gl, TS = world.TS;
     const x1 = Math.min(world.W - 1, x0 + w - 1), y1 = Math.min(world.D - 1, y0 + d - 1);
     x0 = Math.max(0, x0); y0 = Math.max(0, y0);
+    this.heightsChanged = true;
     gl.bindTexture(gl.TEXTURE_2D, this.hTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     for (let ty = Math.floor(y0 / TS); ty <= Math.floor(y1 / TS); ty++) for (let tx = Math.floor(x0 / TS); tx <= Math.floor(x1 / TS); tx++) {
       const t = world.tileOf(tx, ty); if (!t || !t.colH || !this.resident(t)) continue;
       const ax = Math.max(x0, tx * TS) - tx * TS, ay = Math.max(y0, ty * TS) - ty * TS, bx = Math.min(x1, tx * TS + TS - 1) - tx * TS, by = Math.min(y1, ty * TS + TS - 1) - ty * TS;
-      const ww = bx - ax + 1, dd = by - ay + 1, buf = new Uint8Array(ww * dd);
-      for (let y = 0; y < dd; y++) buf.set(t.colH.subarray((ay + y) * TS + ax, (ay + y) * TS + ax + ww), y * ww);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, t.gpu.sx + ax, t.gpu.sy + ay, ww, dd, gl.RED, gl.UNSIGNED_BYTE, buf);
+      const ww = bx - ax + 1, dd = by - ay + 1, buf = new Uint8Array(ww * dd * 2), top = t.colTop || t.colH;
+      for (let y = 0; y < dd; y++) for (let x = 0; x < ww; x++) { const i = (ay + y) * TS + ax + x, q = (y * ww + x) * 2; buf[q] = t.colH[i]; buf[q + 1] = top[i]; }
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, t.gpu.sx + ax, t.gpu.sy + ay, ww, dd, gl.RG, gl.UNSIGNED_BYTE, buf);
     }
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
   }
@@ -195,7 +224,7 @@ export class Renderer {
     bakeBox((x, y, z) => world.getC(x, y, z), (x, y, z) => world.getL(x, y, z), ox, oy, TS, TS, H, true, A, B, this.sun);
     let bricks = null;
     if (t.vol.bricks.size) { const keys = [...t.vol.bricks.keys()]; bricks = { keys, ...this.bakeBricksOf(t, keys) }; }
-    this.uploadTile(t, A, B, sliceBounds(t.vol.data, TS, TS, H), bricks);
+    this.uploadTile(t, A, B, chunkBounds(t.vol.data, TS, TS, H), bricks);
   }
   bakeBricksOf(t, keys) {
     const w = this.world;
@@ -225,7 +254,7 @@ export class Renderer {
       const q = ((dc.y - y0) * w + (dc.x - x0)) * 4, s = ((dc.y - oy) * TS + (dc.x - ox)) * 4;
       A[q] = g.A[s]; A[q + 1] = g.A[s + 1]; A[q + 2] = g.A[s + 2];
     }
-    g.bb = sliceBounds(t.vol.data, TS, TS, H);   // Rechtecke können schrumpfen (Zerstörung) oder wachsen
+    g.bb = chunkBounds(t.vol.data, TS, TS, H);   // Rechtecke können schrumpfen (Zerstörung) oder wachsen
     // Bricks im Bereich neu backen, entfernte freigeben
     if (this.freeSlots) {
       const inR = i => { const x = ox + i % TS, y = oy + ((i / TS) | 0) % TS; return x >= x0 && x <= x1 && y >= y0 && y <= y1; };
@@ -283,7 +312,7 @@ export class Renderer {
     gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LESS); gl.depthMask(true);
     gl.useProgram(this.PG.p); gl.bindVertexArray(this.vao);
     gl.uniform2f(this.PG.u.uScreen, W, H); gl.uniform1f(this.PG.u.uDzu, camera.dzu); gl.uniform1f(this.PG.u.uZMax, this.zMax);
-    this.stats.insts = 0; this.stats.calls = 0;
+    this.stats.insts = 0; this.stats.calls = 0; this.stats.culled = 0; this.stats.area = 0;
   }
   drawInst(TA, TB, M, tw, td, count, rot, o = {}) {
     if (!count) return;
@@ -324,17 +353,26 @@ export class Renderer {
     for (let ty = Math.max(0, Math.floor(gy0 / TS)); ty <= Math.min(world.tilesY - 1, Math.floor(gy1 / TS)); ty++)
       for (let tx = Math.max(0, Math.floor(gx0 / TS)); tx <= Math.min(world.tilesX - 1, Math.floor(gx1 / TS)); tx++) {
         const t = world.tileOf(tx, ty); if (!this.resident(t)) continue;
-        let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
-        for (const [px, py] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
-          const [sx, sy] = cam.project((tx + px) * TS, (ty + py) * TS, 0);
-          minX = Math.min(minX, sx); maxX = Math.max(maxX, sx); minY = Math.min(minY, sy - H * cam.dzu); maxY = Math.max(maxY, sy);
-        }
-        if (maxX < 0 || minX > W || maxY < 0 || minY > Hc) continue;
-        const bb = t.gpu.bb;
-        for (let z = 0; z < H; z++) {
-          const k = z * 4; if (bb[k] < 0) continue;
-          const x0 = bb[k], y0 = bb[k + 1], w = bb[k + 2] - x0 + 1, h = bb[k + 3] - y0 + 1;
-          for (let j = 0; j < nF && c < MAX_INST; j++) { INST.set([z, z + j / nF, tx * TS + x0, ty * TS + y0, w, h, t.gpu.sx + x0, t.gpu.sy + y0], c * 8); c++; }
+        // Gitter-Culling: jede Kachel in Teilstücke von CHUNK × CHUNK; Teilstücke außerhalb des Bildes fallen weg,
+        // und jede Höhe zeichnet nur ihr belegtes Rechteck im Teilstück (weniger verworfene Fragmente)
+        const bb = t.gpu.bb, nC = Math.ceil(TS / CHUNK), SB = 1 + 4 * H;
+        for (let cy = 0; cy < nC; cy++) for (let cx = 0; cx < nC; cx++) {
+          const b = (cy * nC + cx) * SB, top = bb[b]; if (top <= 0) continue;
+          const wx0 = tx * TS + cx * CHUNK, wy0 = ty * TS + cy * CHUNK, wx1 = Math.min(wx0 + CHUNK, (tx + 1) * TS), wy1 = Math.min(wy0 + CHUNK, (ty + 1) * TS);
+          let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+          for (const [px, py] of [[wx0, wy0], [wx1, wy0], [wx0, wy1], [wx1, wy1]]) {
+            const [sx, sy] = cam.project(px, py, 0);
+            minX = Math.min(minX, sx); maxX = Math.max(maxX, sx); minY = Math.min(minY, sy - top * cam.dzu); maxY = Math.max(maxY, sy);
+          }
+          if (maxX < 0 || minX > W || maxY < 0 || minY > Hc) { this.stats.culled++; continue; }
+          for (let z = 0; z < top; z++) {
+            const k = b + 1 + z * 4; if (bb[k] < 0) continue;
+            const x0 = bb[k], y0 = bb[k + 1], w = bb[k + 2] - x0 + 1, h = bb[k + 3] - y0 + 1;
+            // Boden (z = 0): unter ihm liegt nichts, nur die oberste Füllkopie ist sichtbar → eine statt nF Kopien
+            const j0 = z === 0 ? nF - 1 : 0;
+            for (let j = j0; j < nF && c < MAX_INST; j++) { INST.set([z, z + j / nF, tx * TS + x0, ty * TS + y0, w, h, t.gpu.sx + x0, t.gpu.sy + y0], c * 8); c++; }
+            this.stats.area += w * h * (nF - j0);
+          }
         }
       }
     this.drawInst(this.TWA, this.TWB, cam.M, this.WIN, this.WIN, c, 0, { cut: o.cut, rects: true });   // Welt-Normalen sind schon in Weltkoordinaten
@@ -421,39 +459,100 @@ export class Renderer {
    * Lichtpass.
    * @param {object} p
    * @param {number[]} p.ambient      Umgebungslicht rgb
-   * @param {number[]} p.sunColor     Hauptlicht rgb (Richtung = Back-Richtung)
+   * @param {number[]} p.sunColor     Hauptlicht rgb
+   * @param {number[]} [p.sunDir]     Richtung zum Hauptlicht; mit Angabe wird der Schatten pro Bild aus der Höhenkarte
+   *                                  gerechnet (Tageszeit), sonst gilt der gebackene Schatten der Back-Richtung
    * @param {number[]} p.eye          [x, y, z] für Sichtlinie
    * @param {boolean} [p.los]         Bereiche außer Sicht grau
-   * @param {{x,y,z,r,color:number[],shadow?:boolean}[]} p.lights  höchstens 8; Licht 0 kann Spot sein
-   * @param {number[]} [p.spot]       [dx, dy, dz, cos] für Licht 0, oder weglassen
+   * @param {{x,y,z,r,color:number[],shadow?:boolean}[]} p.lights  Punktlichter, bis MAX_LIGHTS; je Bildschirmkachel höchstens PER_TILE
+   * @param {object} [p.spot]         { x, y, z, r, color, dir: [dx, dy, dz], cos, shadow } (Taschenlampe)
+   * @param {number} [p.maxShadowed]  nur die so vielen dem Auge nächsten Lichter werfen Schatten (Standard 8)
    * @param {number} [p.flash]        Blitz 0…1
    * @param {number} [p.quant]        Farbstufen (0 = aus)
    * @param {number} [p.time]         Sekunden, für Pulsieren
    */
   light(p) {
     const gl = this.gl, cam = this.cam, W = this.canvas.width, H = this.canvas.height, u = this.PL.u, t = p.time || 0;
+    // Lichter: Schatten nur für die nächsten, dann auf Kacheln verteilen
+    const lights = (p.lights || []).filter(Boolean).slice(0, MAX_LIGHTS);
+    const eye = p.eye || [cam.x, cam.y, 9], ms = Math.min(p.maxShadowed ?? 8, 14);
+    // Schwellenplätze: 0 = Sicht vom Auge, 1 = Spot, danach die nächsten schattenwerfenden Punktlichter
+    const slotList = [];
+    const addSlot = (x, y, z, r) => { const S = Math.min(256, 2 * Math.ceil(r) + 4); slotList.push({ x: Math.floor(x) - (S >> 1), y: Math.floor(y) - (S >> 1), S, src: [x, y, z] }); return slotList.length - 1; };
+    addSlot(eye[0], eye[1], eye[2], 126);
+    const spotSlot = p.spot && p.spot.shadow !== false ? addSlot(p.spot.x, p.spot.y, p.spot.z, p.spot.r) : -1;
+    const order = lights.map((L, i) => [Math.hypot(L.x - eye[0], L.y - eye[1]), i]).filter(([, i]) => lights[i].shadow !== false).sort((a, b) => a[0] - b[0]);
+    const slotOf = new Map();
+    for (const [, i] of order.slice(0, ms)) { const L = lights[i]; slotOf.set(i, addSlot(L.x, L.y, L.z, L.r)); }
+    const LD = this.LD; LD.fill(0);
+    lights.forEach((L, i) => { LD.set([L.x, L.y, L.z, L.r, L.color[0], L.color[1], L.color[2], slotOf.has(i) ? 2 + slotOf.get(i) : 1], i * 8); });
+    this.renderSlots(slotList, p.los || spotSlot >= 0 || slotOf.size);
+    if (p.sunDir) this.renderSun(p.sunDir, cam);
+    const bins = binLights(lights, cam, W, H, this.zMax, TILE, PER_TILE);
+    this.stats.lights = lights.length; this.stats.lightRefs = bins.list.length; this.stats.lightsDropped = bins.dropped;
+    gl.bindTexture(gl.TEXTURE_2D, this.tL); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, MAX_LIGHTS * 2, 1, gl.RGBA, gl.FLOAT, LD);
+    if (!this.tT || this.tT.w !== bins.cols || this.tT.h !== bins.rows) { if (this.tT) gl.deleteTexture(this.tT); this.tT = this.floatTex(bins.cols, bins.rows, 4); }
+    gl.bindTexture(gl.TEXTURE_2D, this.tT); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, bins.cols, bins.rows, gl.RGBA, gl.FLOAT, bins.header);
+    const rows = Math.max(1, Math.ceil(bins.list.length / 1024));
+    if (rows > this.tIrows) { gl.deleteTexture(this.tI); this.tIrows = rows; this.tI = this.floatTex(1024, rows, 1); }
+    const LI = new Float32Array(rows * 1024); LI.set(bins.list);
+    gl.bindTexture(gl.TEXTURE_2D, this.tI); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1024, rows, gl.RED, gl.FLOAT, LI);
+
     gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H);
     gl.disable(gl.DEPTH_TEST);
     gl.useProgram(this.PL.p); gl.bindVertexArray(this.vaoL);
-    for (let i = 0; i < 4; i++) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, this.gtex[i]); }
-    gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, this.hTex);
+    const texs = [...this.gtex, this.hTex, this.tL, this.tT, this.tI, this.tS, this.tSun];
+    texs.forEach((tx, i) => { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, tx); });
     gl.uniform2f(u.uScreen, W, H); gl.uniform2f(u.uWorld, this.WIN, this.WIN);   // Höhenkarte: Fenster, REPEAT
     gl.uniformMatrix3fv(u.uInv, false, cam.Minv.mat3());
     gl.uniform1f(u.uDzu, cam.dzu); gl.uniform1f(u.uZMax, this.zMax); gl.uniform1f(u.uFlash, p.flash || 0);
     gl.uniform1f(u.uGA, 0.5 + 0.12 * Math.sin(t * 5));
     gl.uniform1f(u.uQuant, p.quant ?? 22); gl.uniform1f(u.uLos, p.los ? 1 : 0);
+    gl.uniform1f(u.uTile, TILE); gl.uniform1i(u.uPerTile, PER_TILE);
     const a = p.ambient, f = p.flash || 0;
     gl.uniform3f(u.uAmb, a[0] + f * 0.5, a[1] + f * 0.5, a[2] + f * 0.6);
-    gl.uniform3fv(u.uSun, this.sun); gl.uniform3fv(u.uSunC, p.sunColor);
-    gl.uniform3fv(u.uEye, p.eye || [0, 0, 9]);
+    gl.uniform3fv(u.uSun, p.sunDir || this.sun); gl.uniform1f(u.uSunMode, p.sunDir ? 1 : 0); gl.uniform3fv(u.uSunC, p.sunColor);
+    gl.uniform3fv(u.uEye, eye);
     gl.uniform3fv(u.uGhostC, p.ghostColor || [0.45, 0.85, 1.0]);
-    this.LP.fill(0); this.LC.fill(0);
-    (p.lights || []).slice(0, MAX_LIGHTS).forEach((L, i) => {
-      if (!L) return;
-      this.LP.set([L.x, L.y, L.z, L.r], i * 4); this.LC.set([L.color[0], L.color[1], L.color[2], L.shadow === false ? 1 : 2], i * 4);
-    });
-    const s = p.spot; gl.uniform4f(u.uSpot, s ? s[0] : 0, s ? s[1] : 0, s ? s[2] : 0, s ? s[3] : -2);
-    gl.uniform4fv(u.uLP, this.LP); gl.uniform4fv(u.uLC, this.LC);
+    const s = p.spot;
+    if (s) {
+      const [dx, dy, dz] = s.dir, l = Math.hypot(dx, dy, dz) || 1;
+      gl.uniform4f(u.uSpot, dx / l, dy / l, dz / l, s.cos); gl.uniform4f(u.uSpP, s.x, s.y, s.z, s.r);
+      gl.uniform4f(u.uSpC, s.color[0], s.color[1], s.color[2], spotSlot >= 0 ? 2 + spotSlot : 1);
+    } else gl.uniform4f(u.uSpC, 0, 0, 0, 0);
+    gl.uniform4fv(u.uSlots, this.slots); gl.uniform1f(u.uAtlas, this.ATL);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  /** Schwellen für Auge, Spot und Lichter in den Atlas rendern (ein Dreieck pro Platz). */
+  renderSlots(list, any) {
+    const gl = this.gl, u = this.PS.u;
+    this.slots.fill(0);
+    list.forEach((sl, i) => this.slots.set([sl.x, sl.y, sl.S, 0], i * 4));
+    if (!any) return;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.tS.fbo); gl.disable(gl.DEPTH_TEST);
+    gl.useProgram(this.PS.p); gl.bindVertexArray(this.vaoL);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.hTex);
+    gl.uniform2f(u.uWorld, this.WIN, this.WIN);
+    list.forEach((sl, i) => {
+      const ox = (i * 256) % this.ATL, oy = Math.floor(i * 256 / this.ATL) * 256;
+      gl.viewport(ox, oy, sl.S, sl.S);
+      gl.uniform4f(u.uSlot, sl.x, sl.y, sl.S, 0); gl.uniform3f(u.uSrc, sl.src[0], sl.src[1], sl.src[2]); gl.uniform2f(u.uOrigin, ox, oy);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    });
+    this.stats.slots = list.length;
+  }
+  /** Sonnenschwellen über das Fenster, nur wenn sich Richtung, Höhen oder Fenster geändert haben. */
+  renderSun(dir, cam) {
+    const gl = this.gl, u = this.PSun.u, WIN = this.WIN;
+    const ox = Math.floor(cam.x - WIN / 2), oy = Math.floor(cam.y - WIN / 2);
+    const key = dir.map(v => v.toFixed(3)).join() + '|' + Math.floor(ox / 16) + ',' + Math.floor(oy / 16);
+    if (key === this.sunKey && !this.heightsChanged) return;
+    this.sunKey = key; this.heightsChanged = false;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.tSun.fbo); gl.disable(gl.DEPTH_TEST); gl.viewport(0, 0, WIN, WIN);
+    gl.useProgram(this.PSun.p); gl.bindVertexArray(this.vaoL);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.hTex);
+    gl.uniform2f(u.uWorld, WIN, WIN); gl.uniform3fv(u.uSun, dir); gl.uniform2f(u.uOrigin, ox, oy); gl.uniform1f(u.uZMax, this.zMax);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    this.stats.sunPasses = (this.stats.sunPasses || 0) + 1;
   }
 }

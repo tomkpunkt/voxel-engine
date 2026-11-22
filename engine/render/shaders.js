@@ -50,10 +50,13 @@ void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); gl_Position
 
 export const FS_L = `#version 300 es
 precision highp float; precision highp int;
-uniform sampler2D tA, tN, tX, tG, tH;
+uniform sampler2D tA, tN, tX, tG, tH, tL, tT, tI, tS, tSun;   // tS Schwellen-Atlas (Sicht, Lichtschatten), tSun Sonnenschwellen   // tL Lichter (2 Texel je Licht), tT Kachelkopf, tI Lichtindizes
 uniform vec2 uScreen, uWorld; uniform mat3 uInv; uniform float uDzu, uGA, uFlash, uZMax, uQuant, uLos;
 uniform vec3 uAmb, uSun, uSunC, uEye, uGhostC;
-uniform vec4 uLP[8]; uniform vec4 uLC[8]; uniform vec4 uSpot;
+uniform vec4 uSpot, uSpP, uSpC;       // Spot: Richtung + cos, Position + Reichweite, Farbe + Schatten
+uniform float uSunMode, uTile; uniform int uPerTile;
+uniform vec4 uSlots[16];   // Atlasplätze: Weltursprung x, y, Größe S, Atlas-Ursprung (u = v = Platz · 256)
+uniform float uAtlas;
 out vec4 o;
 float bayer(ivec2 p){ int x = p.x & 3, y = p.y & 3;
   int m[16] = int[16](0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5); return float(m[y*4+x]) / 16.0 - 0.47; }
@@ -67,6 +70,27 @@ float hvis(vec3 P, vec3 L){
     if (texture(tH, q.xy / uWorld).r * 255.0 > q.z) return 0.0;
   }
   return 1.0;
+}
+// Schatten des Hauptlichts aus der Höhenkarte (G = oberste Höhe, auch über Lücken)
+float sunVis(vec3 P, vec3 dir){
+  float st = max(1.0, uZMax / 24.0);               // ~40 Schritte bis zur doppelten Welthöhe
+  for (int k = 1; k < 48; k++) {
+    vec3 q = P + dir * (float(k) * st);
+    if (q.z > uZMax) break;
+    if (texture(tH, q.xy / uWorld).g * 255.0 > q.z) return 0.0;
+  }
+  return 1.0;
+}
+// Sicht/Schatten aus dem Schwellen-Atlas: ein Punkt in Höhe z ist sichtbar, wenn z ≥ Schwelle der Zelle.
+// Die Schwelle ist linear gefiltert, smoothstep macht daraus weiche Kanten (ersetzt die zwei Strahlen pro Pixel).
+float slotVis(int s, vec3 P){
+  vec4 sl = uSlots[s];
+  vec2 c = P.xy - sl.xy;
+  if (c.x < 0.5 || c.y < 0.5 || c.x > sl.z - 0.5 || c.y > sl.z - 0.5) return 1.0;
+  float base = float(s) * 256.0;
+  vec2 uv = vec2(mod(base, uAtlas) + c.x, floor(base / uAtlas) * 256.0 + c.y) / uAtlas;
+  float thr = texture(tS, uv).r * 255.0;
+  return smoothstep(thr - 0.8, thr + 0.8, P.z);
 }
 // Weiche Kanten: zwei Strahlen zu seitlich versetzten Punkten an der Quelle, Versatz Bayer-gestreut
 float hvisAA(vec3 P, vec3 L, float r, float j){
@@ -86,22 +110,39 @@ void main(){
   vec3 col;
   if (x.b > 0.5) col = a.rgb * 1.3;
   else {
-    vec3 lit = uAmb * ao + uSunC * (1.0 + uFlash * 5.0) * max(dot(n, uSun), 0.0) * x.r;
-    for (int i = 0; i < 8; i++) {
-      if (uLC[i].a < 0.5) continue;
-      vec3 d = uLP[i].xyz - P; float dist = length(d);
-      if (dist >= uLP[i].w) continue;
+    float sd = max(dot(n, uSun), 0.0);
+    float sh = x.r;
+    if (uSunMode > 0.5) { float thr = texture(tSun, P.xy / uWorld).r * 255.0; sh = sd > 0.0 ? smoothstep(thr - 0.8, thr + 0.8, P.z) : 0.0; }
+    vec3 lit = uAmb * ao + uSunC * (1.0 + uFlash * 5.0) * sd * sh;
+    // Spot (Taschenlampe)
+    if (uSpC.a > 0.5) {
+      vec3 d = uSpP.xyz - P; float dist = length(d);
+      if (dist < uSpP.w) {
+        vec3 l = d / dist; float c = dot(-l, uSpot.xyz);
+        float att = pow(1.0 - dist / uSpP.w, 2.0) * (max(dot(n, l), 0.0) * 0.8 + 0.2) * smoothstep(uSpot.w, uSpot.w + 0.13, c) * (0.75 + 0.25 * smoothstep(uSpot.w + 0.05, 1.0, c));
+        if (att > 0.004) { if (uSpC.a > 1.5) att *= slotVis(int(uSpC.a) - 2, P); lit += uSpC.rgb * att; }
+      }
+    }
+    // Punktlichter dieser Bildschirmkachel
+    vec4 hd = texelFetch(tT, ivec2(gl_FragCoord.xy / uTile), 0);
+    int off = int(hd.x), cnt = min(int(hd.y), uPerTile);
+    for (int k = 0; k < 64; k++) {
+      if (k >= cnt) break;
+      int j = off + k;
+      int li = int(texelFetch(tI, ivec2(j % 1024, j / 1024), 0).r);
+      vec4 LP = texelFetch(tL, ivec2(li * 2, 0), 0), LC = texelFetch(tL, ivec2(li * 2 + 1, 0), 0);
+      vec3 d = LP.xyz - P; float dist = length(d);
+      if (dist >= LP.w) continue;
       vec3 l = d / dist;
-      float att = pow(1.0 - dist / uLP[i].w, 2.0) * (max(dot(n, l), 0.0) * 0.8 + 0.2);
-      if (i == 0 && uSpot.w > -1.5) { float c = dot(-l, uSpot.xyz); att *= smoothstep(uSpot.w, uSpot.w + 0.13, c) * (0.75 + 0.25 * smoothstep(uSpot.w + 0.05, 1.0, c)); }
+      float att = pow(1.0 - dist / LP.w, 2.0) * (max(dot(n, l), 0.0) * 0.8 + 0.2);
       if (att < 0.004) continue;
-      if (uLC[i].a > 1.5) att *= i == 0 ? hvisAA(P, uLP[i].xyz, 0.9, bayer(p)) : hvis(P, uLP[i].xyz);
-      lit += uLC[i].rgb * att;
+      if (LC.a > 1.5) att *= slotVis(int(LC.a) - 2, P);
+      lit += LC.rgb * att;
     }
     col = a.rgb * lit;
   }
   if (uLos > 0.5) {   // Bereiche außerhalb der Sicht grau, Gegner fast schwarz
-    float vis = hvisAA(P, uEye, 0.55, bayer(p.yx));
+    float vis = slotVis(0, P);
     float g = dot(col, vec3(0.3, 0.55, 0.15));
     if ((fl & 2) == 2) col *= mix(0.05, 1.0, vis);
     else col = mix(vec3(g) * vec3(0.6, 0.65, 0.8) * 0.6, col, vis);
@@ -123,4 +164,44 @@ void main(){
     }
   }
   o = vec4(col, 1.0);
+}`;
+
+// Schwellen-Pass: pro Zelle eines Atlasplatzes die kleinste Höhe, ab der ein Punkt die Quelle (Auge oder Licht)
+// über die Höhenkarte sieht: z ≥ E + (h − E) / s für jeden Schritt s ∈ (0, 1) vom Punkt zur Quelle.
+export const FS_SLOT = `#version 300 es
+precision highp float;
+uniform sampler2D tH; uniform vec2 uWorld; uniform vec4 uSlot; uniform vec3 uSrc; uniform vec2 uOrigin;
+out vec4 o;
+void main(){
+  vec2 cell = gl_FragCoord.xy - uOrigin;
+  vec2 P = uSlot.xy + cell;
+  vec2 d = uSrc.xy - P; float len = length(d);
+  float n = min(ceil(len), 160.0), thr = 0.0;
+  for (float k = 1.0; k < 160.0; k++) {
+    if (k >= n) break;
+    float s = 1.0 - k / n;                       // Anteil der Strecke vom Punkt aus: 1 am Punkt, 0 an der Quelle
+    vec2 q = P + d * (k / n);
+    float h = texture(tH, q / uWorld).r * 255.0;
+    thr = max(thr, uSrc.z + (h - uSrc.z) / max(s, 0.02));
+  }
+  o = vec4(min(thr, 255.0) / 255.0, 0.0, 0.0, 1.0);
+}`;
+// Sonnen-Pass: Schwelle für das gerichtete Hauptlicht über das Fenster (oberste Höhen, Kanal G):
+// z ≥ h(p + dir·t) − t·Steigung für alle t.
+export const FS_SUN = `#version 300 es
+precision highp float;
+uniform sampler2D tH; uniform vec2 uWorld; uniform vec3 uSun; uniform vec2 uOrigin; uniform float uZMax;
+out vec4 o;
+void main(){
+  vec2 P = uOrigin + mod(floor(gl_FragCoord.xy) - uOrigin, uWorld) + 0.5;   // Texel i ↔ Weltzelle im Fenster mit x ≡ i (mod WIN)
+  vec2 dxy = uSun.xy; float l = length(dxy), slope = uSun.z / max(l, 1e-4);
+  vec2 dir = dxy / max(l, 1e-4);
+  float st = max(1.0, uZMax / 24.0), thr = 0.0;
+  for (int k = 1; k < 64; k++) {
+    float t = float(k) * st;
+    if (t * slope > uZMax) break;
+    float h = texture(tH, (P + dir * t) / uWorld).g * 255.0;
+    thr = max(thr, h - t * slope);
+  }
+  o = vec4(clamp(thr, 0.0, 255.0) / 255.0, 0.0, 0.0, 1.0);
 }`;
