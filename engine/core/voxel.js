@@ -23,18 +23,64 @@ export function shade(hex, f) {
 export const jit = (hex, amt, h) => shade(hex, 1 + (h - 0.5) * amt);
 export const rgbOf = hex => [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255];
 
-/** Dichtes Volumen w × d × h (x schnell, dann y, dann z). */
+/**
+ * Volumen w × d × h (x schnell, dann y, dann z) mit Palette: pro Voxel ein Uint16-Index auf ein Paar (Farbe, Flags).
+ * Index 0 = leer. 2 Byte pro Voxel statt 5 (Uint32 Farbe + Uint8 Flags). Ab 64 000 Einträgen werden neue Farben
+ * auf 3 Bit pro Kanal vergröbert (die letzten Plätze sind dafür reserviert); bei normalem Inhalt kommt das nicht vor.
+ */
 export class Volume {
   constructor(w, d, h) {
     this.w = w; this.d = d; this.h = h;
-    this.col = new Uint32Array(w * d * h);
-    this.lay = new Uint8Array(w * d * h);
+    this.data = new Uint16Array(w * d * h);
+    this.palC = new Uint32Array(256); this.palL = new Uint8Array(256); this.n = 1;
+    this.map = null;
   }
   idx(x, y, z) { return (z * this.d + y) * this.w + x; }
   ok(x, y, z) { return x >= 0 && y >= 0 && z >= 0 && x < this.w && y < this.d && z < this.h; }
-  set(x, y, z, c, l = 0) { if (this.ok(x, y, z)) { const i = this.idx(x, y, z); this.col[i] = c; this.lay[i] = c ? l : 0; } }
-  get(x, y, z) { return this.ok(x, y, z) ? this.col[this.idx(x, y, z)] : 0; }
-  getLay(x, y, z) { return this.ok(x, y, z) ? this.lay[this.idx(x, y, z)] : 0; }
+  /** Palettenindex für (Farbe, Flags), legt ihn bei Bedarf an. */
+  index(c, l = 0) {
+    if (!c) return 0;
+    if (!this.map) { this.map = new Map(); for (let i = 1; i < this.n; i++) this.map.set(this.palC[i] * 256 + this.palL[i], i); }
+    const k = c * 256 + (l & 255);
+    let i = this.map.get(k);
+    if (i !== undefined) return i;
+    if (this.n >= 64000) {
+      // Palette fast voll: grob auf 3 Bit pro Kanal (512 Farben je Flag-Kombination), die letzten Plätze dafür reserviert
+      const q = (c & 0xff000000) | (c & 0xe0e0e0) | 0x101010;
+      if (q !== c) { i = this.index(q, l); this.map.set(k, i); return i; }
+      if (this.n >= 65535) {                                      // auch das voll: nächster vorhandener Eintrag (gemerkt)
+        let best = 1, bd = 1e9;
+        for (let j = 1; j < this.n; j++) { const e = this.palC[j], dd = Math.abs((e & 255) - (c & 255)) + Math.abs(((e >> 8) & 255) - ((c >> 8) & 255)) + Math.abs(((e >> 16) & 255) - ((c >> 16) & 255)); if (dd < bd) { bd = dd; best = j; } }
+        this.map.set(k, best); return best;
+      }
+    }
+    if (this.n >= this.palC.length) {
+      const nc = new Uint32Array(this.palC.length * 2), nl = new Uint8Array(this.palC.length * 2);
+      nc.set(this.palC); nl.set(this.palL); this.palC = nc; this.palL = nl;
+    }
+    i = this.n++; this.palC[i] = c; this.palL[i] = l & 255; this.map.set(k, i);
+    return i;
+  }
+  set(x, y, z, c, l = 0) { if (this.ok(x, y, z)) this.data[this.idx(x, y, z)] = this.index(c, l); }
+  setAt(i, c, l = 0) { this.data[i] = this.index(c, l); }
+  get(x, y, z) { return this.ok(x, y, z) ? this.palC[this.data[this.idx(x, y, z)]] : 0; }
+  getLay(x, y, z) { return this.ok(x, y, z) ? this.palL[this.data[this.idx(x, y, z)]] : 0; }
+  colAt(i) { return this.palC[this.data[i]]; }
+  layAt(i) { return this.palL[this.data[i]]; }
+  /** Speicherbedarf in Byte. */
+  bytes() { return this.data.byteLength + this.n * 5; }
+  /** Als übertragbares Objekt (für postMessage); copy = false gibt die eigenen Puffer ab. */
+  pack(copy = true) {
+    const o = { w: this.w, d: this.d, h: this.h, n: this.n, data: copy ? this.data.slice() : this.data, palC: this.palC.slice(0, this.n), palL: this.palL.slice(0, this.n) };
+    return o;
+  }
+  static transfer(o) { return [o.data.buffer, o.palC.buffer, o.palL.buffer]; }
+  static unpack(o) {
+    const v = Object.create(Volume.prototype);
+    Object.assign(v, { w: o.w, d: o.d, h: o.h, data: o.data, palC: o.palC, palL: o.palL, n: o.n, map: null });
+    if (v.palC.length < v.n + 1) { /* wächst bei Bedarf in index() */ }
+    return v;
+  }
 }
 
 /** Volumen aus einer Funktion fn(x, y, z) → Farbe; x und y sind um die Mitte zentriert. */

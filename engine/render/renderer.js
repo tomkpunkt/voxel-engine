@@ -100,38 +100,45 @@ export class Renderer {
     this.world = world; this.win = win; this.WIN = win * world.TS;
     this.TWA = this.texArray(this.WIN, this.WIN, world.H); this.TWB = this.texArray(this.WIN, this.WIN, world.H);
     this.slotOwner = new Int32Array(win * win).fill(-1);
+    // Höhenkarte nur für das Fenster, gleiche Plätze wie die Voxel; REPEAT adressiert über Weltkoordinaten mod WIN
     this.hTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, this.hTex);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, world.W, world.D);
-    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, this.WIN, this.WIN);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST], [gl.TEXTURE_WRAP_S, gl.REPEAT], [gl.TEXTURE_WRAP_T, gl.REPEAT]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, world.W, world.D, gl.RED, gl.UNSIGNED_BYTE, world.colH);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.WIN, this.WIN, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(this.WIN * this.WIN));
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
-    world.on('tileLoaded', t => this.uploadHeight(t.tx * world.TS, t.ty * world.TS, world.TS, world.TS));
     world.on('regionChanged', (x0, y0, x1, y1) => {
       this.uploadHeight(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
       this.rebake(x0 - 1, y0 - 1, x1 + 1, y1 + 1);    // 1 Voxel Rand: Normalen und Verdeckung der Nachbarn ändern sich mit
     });
+    world.on('tileUnloaded', t => { if (this.resident(t)) { this.slotOwner[this.slotOf(t.tx, t.ty)] = -1; } t.gpu = null; });
   }
   slotOf(tx, ty) { const w = this.win; return (((ty % w) + w) % w) * w + (((tx % w) + w) % w); }
   /** Liegt die Kachel aktuell gebacken auf der GPU? */
   resident(t) { return !!t && !!t.gpu && this.slotOwner[this.slotOf(t.tx, t.ty)] === t.key; }
+  /** Speicher auf der GPU in Byte (Welt-Fenster und Höhenkarte). */
+  gpuBytes() { return this.WIN * this.WIN * this.world.H * 8 + this.WIN * this.WIN; }
 
+  /** Höhen eines Weltrechtecks in den Fensterplatz ihrer Kachel laden (nur für Kacheln, die dort liegen). */
   uploadHeight(x0, y0, w, d) {
-    const world = this.world, gl = this.gl;
-    x0 = Math.max(0, x0); y0 = Math.max(0, y0); w = Math.min(world.W - x0, w); d = Math.min(world.D - y0, d);
-    if (w <= 0 || d <= 0) return;
-    const buf = new Uint8Array(w * d);
-    for (let y = 0; y < d; y++) buf.set(world.colH.subarray((y0 + y) * world.W + x0, (y0 + y) * world.W + x0 + w), y * w);
+    const world = this.world, gl = this.gl, TS = world.TS;
+    const x1 = Math.min(world.W - 1, x0 + w - 1), y1 = Math.min(world.D - 1, y0 + d - 1);
+    x0 = Math.max(0, x0); y0 = Math.max(0, y0);
     gl.bindTexture(gl.TEXTURE_2D, this.hTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, x0, y0, w, d, gl.RED, gl.UNSIGNED_BYTE, buf);
+    for (let ty = Math.floor(y0 / TS); ty <= Math.floor(y1 / TS); ty++) for (let tx = Math.floor(x0 / TS); tx <= Math.floor(x1 / TS); tx++) {
+      const t = world.tileOf(tx, ty); if (!t || !t.colH || !this.resident(t)) continue;
+      const ax = Math.max(x0, tx * TS) - tx * TS, ay = Math.max(y0, ty * TS) - ty * TS, bx = Math.min(x1, tx * TS + TS - 1) - tx * TS, by = Math.min(y1, ty * TS + TS - 1) - ty * TS;
+      const ww = bx - ax + 1, dd = by - ay + 1, buf = new Uint8Array(ww * dd);
+      for (let y = 0; y < dd; y++) buf.set(t.colH.subarray((ay + y) * TS + ax, (ay + y) * TS + ax + ww), y * ww);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, t.gpu.sx + ax, t.gpu.sy + ay, ww, dd, gl.RED, gl.UNSIGNED_BYTE, buf);
+    }
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
   }
 
-  /** Ganze Kachel backen und in ihren Platz laden (Nachbarn sollten geladen sein, sonst fehlen Normalen am Rand). */
-  bakeTile(t) {
+  /** Fertig gebackene Kachel (aus einem Worker) in ihren Platz laden. A wird behalten (Decals). */
+  uploadTile(t, A, B, bb) {
     const world = this.world, gl = this.gl, TS = world.TS, H = world.H;
-    const n = TS * TS * H * 4, A = new Uint8Array(n), B = new Uint8Array(n), ox = t.tx * TS, oy = t.ty * TS;
-    bakeBox((x, y, z) => world.getC(x, y, z), (x, y, z) => world.getL(x, y, z), ox, oy, TS, TS, H, true, A, B, this.sun);
+    const ox = t.tx * TS, oy = t.ty * TS;
     for (const dc of t.decals) this.paintDecal(A, dc.x - ox, dc.y - oy, dc.c, dc.a, TS);
     const s = this.slotOf(t.tx, t.ty), sx = (s % this.win) * TS, sy = ((s / this.win) | 0) * TS;
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.TWA); gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, sx, sy, 0, TS, TS, H, gl.RGBA, gl.UNSIGNED_BYTE, A);
@@ -139,7 +146,15 @@ export class Renderer {
     const prev = this.slotOwner[s];
     if (prev >= 0 && prev !== t.key) { const old = world.tiles.get(prev); if (old) old.gpu = null; }
     this.slotOwner[s] = t.key;
-    t.gpu = { A, bb: sliceBounds(t.vol.col, TS, TS, H), sx, sy, rev: t.rev };
+    t.gpu = { A, bb, sx, sy, rev: t.rev };
+    this.uploadHeight(ox, oy, TS, TS);
+  }
+  /** Ganze Kachel im Haupt-Thread backen (ohne Worker). Nachbarn sollten geladen sein, sonst fehlen Normalen am Rand. */
+  bakeTile(t) {
+    const world = this.world, TS = world.TS, H = world.H;
+    const n = TS * TS * H * 4, A = new Uint8Array(n), B = new Uint8Array(n), ox = t.tx * TS, oy = t.ty * TS;
+    bakeBox((x, y, z) => world.getC(x, y, z), (x, y, z) => world.getL(x, y, z), ox, oy, TS, TS, H, true, A, B, this.sun);
+    this.uploadTile(t, A, B, sliceBounds(t.vol.data, TS, TS, H));
   }
   /** Rechteck in Weltkoordinaten neu backen, auch über Kachelgrenzen. */
   rebake(x0, y0, x1, y1) {
@@ -165,7 +180,7 @@ export class Renderer {
       const q = ((dc.y - y0) * w + (dc.x - x0)) * 4, s = ((dc.y - oy) * TS + (dc.x - ox)) * 4;
       A[q] = g.A[s]; A[q + 1] = g.A[s + 1]; A[q + 2] = g.A[s + 2];
     }
-    g.bb = sliceBounds(t.vol.col, TS, TS, H);   // Rechtecke können schrumpfen (Zerstörung) oder wachsen
+    g.bb = sliceBounds(t.vol.data, TS, TS, H);   // Rechtecke können schrumpfen (Zerstörung) oder wachsen
     g.rev = t.rev;
     const tx = g.sx + x0 - ox, ty = g.sy + y0 - oy;
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.TWA); gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, tx, ty, 0, w, d, H, gl.RGBA, gl.UNSIGNED_BYTE, A);
@@ -199,7 +214,7 @@ export class Renderer {
     const A = new Uint8Array(n * vols.length), B = new Uint8Array(n * vols.length);
     vols.forEach((v, i) => bakeBox((x, y, z) => v.get(x, y, z), (x, y, z) => v.getLay(x, y, z), 0, 0, w, d, h, false,
       A.subarray(i * n, (i + 1) * n), B.subarray(i * n, (i + 1) * n), this.sun));
-    const used = vols.map(v => { const u = new Array(h).fill(false); for (let z = 0; z < h; z++) for (let k = z * w * d; k < (z + 1) * w * d; k++) if (v.col[k]) { u[z] = true; break; } return u; });
+    const used = vols.map(v => { const u = new Array(h).fill(false); for (let z = 0; z < h; z++) for (let k = z * w * d; k < (z + 1) * w * d; k++) if (v.data[k]) { u[z] = true; break; } return u; });
     return { w, d, h, n: vols.length, used, A: this.texArray(w, d, h * vols.length, A), B: this.texArray(w, d, h * vols.length, B) };
   }
 
@@ -320,7 +335,7 @@ export class Renderer {
     gl.useProgram(this.PL.p); gl.bindVertexArray(this.vaoL);
     for (let i = 0; i < 4; i++) { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, this.gtex[i]); }
     gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, this.hTex);
-    gl.uniform2f(u.uScreen, W, H); gl.uniform2f(u.uWorld, this.world.W, this.world.D);
+    gl.uniform2f(u.uScreen, W, H); gl.uniform2f(u.uWorld, this.WIN, this.WIN);   // Höhenkarte: Fenster, REPEAT
     gl.uniformMatrix3fv(u.uInv, false, cam.Minv.mat3());
     gl.uniform1f(u.uDzu, cam.dzu); gl.uniform1f(u.uZMax, this.zMax); gl.uniform1f(u.uFlash, p.flash || 0);
     gl.uniform1f(u.uGA, 0.5 + 0.12 * Math.sin(t * 5));

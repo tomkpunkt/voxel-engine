@@ -1,5 +1,5 @@
 // Maßstab von Totenstadt – alles bezogen auf die Spielfigur (≈ 2 m hoch).
-// 1 Voxel = 20 cm (5 Voxel pro Meter), senkrecht wie waagerecht.
+// 1 Voxel = 20 cm (5 Voxel pro Meter), senkrecht wie waagerecht. Stadt: 64 × 64 Grundstücke à 16 m = 1024 m.
 import { FLAG } from '../../engine/core/voxel.js';
 
 export const VPM = 5, M = m => Math.round(m * VPM);
@@ -16,8 +16,8 @@ export const SCALE = {
   auto: { l: M(4.6), b: M(1.8), h: 8 },              // 23 × 9 × 8
   laterne: M(5.6), baum: M(5.5),                     // 28 / 27
 };
-export const TS = SCALE.grundstueck, GN = 12, W = TS * GN, D = TS * GN, H = 32;
+export const TS = SCALE.grundstueck, GN = 64, W = TS * GN, D = TS * GN, H = 32;
 export const WALL_H = SCALE.raumhoehe, DOOR_H = SCALE.tuer.hoehe, DOOR_W = SCALE.tuer.breite, CLEAR = SCALE.durchgang;
-export const ROOF = FLAG.ROOF, WALLTOP = FLAG.WALLTOP, DOORLEAF = FLAG.GAME0;
+export const ROOF = FLAG.ROOF, WALLTOP = FLAG.WALLTOP, DOORLEAF = FLAG.GAME0, DOOROPEN = FLAG.GAME1;
 export const DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]];
-export const GEN_VERSION = 3;
+export const GEN_VERSION = 4;

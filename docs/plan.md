@@ -41,7 +41,24 @@ Die Engine entsteht aus [Totenstadt](../games/totenstadt/) heraus, in spielbaren
 - **Abnahme**: `npm test` (17 Tests), `tools/screenshots.py` (8 Szenen mit fester Saat, Kamera und Tageszeit).
 
 Offen aus Etappe 1, verschoben:
-- Paletten-Kompression der Kacheln → Etappe 2 (dort zählt der Speicher).
+- ~~Paletten-Kompression der Kacheln → Etappe 2~~ (erledigt in Etappe 2).
 - Totenstadt nutzt das ECS noch nicht; Zombies und Spieler sind weiterhin einfache Objekte. Umstellung, wenn Etappe 3 Trümmer als Entities braucht.
 - Gamepad, IndexedDB, Debug-Overlay → mit Etappe 2 und 4.
 - Der Hauptlicht-Schatten ist gebacken; bei anderer Tageszeit ändert sich Farbe und Stärke, nicht die Richtung. Dynamische Richtung über die Höhenkarte → Etappe 4.
+
+### Etappe 2 – erledigt (2026-11-22)
+
+- **Paletten-Volumen** (`engine/core/voxel.js`): pro Voxel ein Uint16-Index auf (Farbe, Flags). Totenstadt-Kacheln: im Mittel 576 Paletteneinträge (höchstens 1 093), 402 KB statt 1 000 KB pro Kachel. Ab 64 000 Einträgen wird vergröbert, nie gescheitert.
+- **Karten pro Kachel** (`engine/world/world.js`): Säulenhöhe, Kollision und verdickte Wegkarte liegen in der Kachel (je TS × TS) statt für die ganze Welt; nicht geladene Kacheln gelten als blockiert. Bei 5 120 × 5 120 Voxeln hätten die globalen Karten 75 MB gekostet.
+- **Builder und Worker** (`engine/stream/builder.js`, `worker.js`, `streamer.js`): Das Spiel liefert ein reines Generator-Modul (`createGenerator(config)`), das im Worker läuft. Ein Auftrag enthält die Kachel und ihre 8 Nachbarn mit Revision, Spielzustand (`tile.state`) und Deltas; der Worker hält einen Cache, erzeugt nur Veraltetes neu, rechnet Karten und backt. Ergebnisse mit älterer Revision verwirft die Hauptseite und beauftragt neu. `LocalBackend` macht dasselbe synchron (Node, kleine Welten, Rückfall, wenn Worker nicht starten).
+- **Fenster statt Welt auf der GPU und in der Wegfindung**: Höhenkarte nur noch WIN × WIN mit REPEAT-Adressierung (gleiche Plätze wie die Voxel), `FlowField` rechnet ein Quadrat um das Ziel (283 × 283 bei 140 Voxeln Reichweite).
+- **Totenstadt 1 km**: 64 × 64 Grundstücke à 16 m (1 024 m). WFC mit Zähler je Zelle statt Neuzählen (Plan 64 × 64 in etwa 0,5 s). Türzustand über `tile.state`, Kollision rein aus Flags (`DOOROPEN`), Gebäude pro Kachel statt globaler Gebäudekarte, Minikarte zeigt 16 × 16 Grundstücke um die Figur.
+- **Abnahme**:
+  - `tools/rundgang.py`: feste Saat, Route über 12 160 Voxel (2,4 km) mit 3 Voxeln pro Bild. Ergebnis (Container, 2 Kerne, Software-Rendering, 1 Worker): 785 Kacheln gebacken, 0 verworfen, in keinem Bild fehlte die eigene Kachel; höchstens 35 Kacheln geladen, Welt 15 MB, GPU 41 MB, JS-Heap 61 MB. Bildzeit p50 95 ms – auf dieser Maschine liegt schon der Stand von Etappe 1 im Stehen bei 244 ms (p50), die Werte taugen also nur zum Vergleich auf derselben Maschine.
+  - Zustand nach Entladen: Tür umgelegt und Loch in die Wand geschlagen, 2,4 km weggefahren (Kachel entladen), zurück: Tür, Loch und Kollision stimmen, Entities nicht doppelt (`tools/rundgang.py` prüft das und endet sonst mit Fehlercode).
+  - `npm test`: 20 Tests, neu u. a. veraltete Revision wird verworfen, Fenster entlädt, Palette läuft über.
+
+Offen aus Etappe 2:
+- Echte Bildzeiten auf Handy und Desktop-GPU messen (der Rundgang läuft auch dort, wenn man ihn im Browser von Hand startet).
+- Speicher der Worker-Caches (je bis zu 40 Kacheln, etwa 16 MB) zählt der Rundgang nicht mit.
+- Zombies verschwinden weiterhin am Fensterrand.

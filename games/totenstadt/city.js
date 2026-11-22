@@ -1,11 +1,11 @@
 // Stadt von Totenstadt: Stadtplan per Wave Function Collapse mit Sockeln, Kacheln per Bau-Grammatik.
-// Nutzt die Engine (World, wfc, planRooms); alles Spielspezifische (Türen, Behälter, Lichter) steht hier.
-import { World } from '../../engine/world/world.js';
+// Reines Generator-Modul (läuft im Worker): createGenerator({ seed }) für den Builder der Engine.
+// Entities (Lichter, Behälter, Türen, Gebäude) meldet generate über ctx.add; den Türzustand liest es aus tile.state.
 import { wfc } from '../../engine/gen/wfc.js';
 import { planRooms } from '../../engine/gen/floorplan.js';
 import { hash3, vnoise, mulberry32, pick, ri } from '../../engine/core/rand.js';
 import { C, E, shade, jit } from '../../engine/core/voxel.js';
-import { VPM, M, SCALE, TS, GN, W, D, H, WALL_H, DOOR_H, DOOR_W, CLEAR, ROOF, WALLTOP, DOORLEAF, DIRS, GEN_VERSION } from './scale.js';
+import { VPM, M, SCALE, TS, GN, W, D, H, WALL_H, DOOR_H, DOOR_W, CLEAR, ROOF, WALLTOP, DOORLEAF, DOOROPEN, DIRS, GEN_VERSION } from './scale.js';
 
 // ---- Kacheltypen und Sockel
 //  Kante einer Straßenkachel: R (Straße, Kachel mit ≤ 2 Ästen), J (Straße an Kreuzung/T),
@@ -28,12 +28,13 @@ const CROSS = TILES.findIndex(t => t.mask === 15);
 export function cityPlan(seed, n = GN) {
   const rng = mulberry32(seed);
   let res = null, bestErr = 9;
-  for (let tries = 0; tries < 80; tries++) {
+  const tries0 = n > 24 ? 12 : 80;
+  for (let tries = 0; tries < tries0; tries++) {
     const r = wfc(n, rng, { weights: TILES.map(t => t.w), sockets: SOCK, compat: COMPAT, border: s => s >= SF, seed: { cell: (n >> 1) * n + (n >> 1), tile: CROSS } });
     if (!r) continue;
     const err = Math.abs(r.grid.filter(t => TILES[t].kind === 'road').length / (n * n) - 0.3);
     if (err < bestErr) { bestErr = err; res = r; }
-    if (err < 0.04) break;
+    if (err < (n > 24 ? 0.05 : 0.04)) break;
   }
   return res;
 }
@@ -57,39 +58,26 @@ export function doorVoxels(dr, set, getLay) {
     for (let z = 1; z <= DOOR_H; z++) {
       const edge = k === 0 || k === DOOR_W - 1 || z === DOOR_H;
       const c = dr.glass ? (edge ? 0x3a3c42 : 0x2a4458) : (edge ? shade(dr.col, 0.75) : (z === 6 && k === DOOR_W - 2 ? 0xc8b060 : jit(dr.col, 0.1, hash3(x, y, z))));
-      set(x, y, z, C(c), DOORLEAF | (z >= 5 ? WALLTOP : 0));
+      set(x, y, z, C(c), DOORLEAF | (dr.open ? DOOROPEN : 0) | (z >= 5 ? WALLTOP : 0));
     }
   });
 }
 export const doorCenter = dr => [dr.x + (dr.v ? 0.5 : DOOR_W / 2), dr.y + (dr.v ? DOOR_W / 2 : 0.5)];
 
-/**
- * Stadt anlegen: Plan sofort, Voxel je Kachel bei Bedarf über world.ensure().
- * Spielzustand (Türen, Behälter, Lichter, Gebäude) entsteht beim ersten Erzeugen einer Kachel und bleibt.
- */
-export function createCity(seed) {
-  const plan = cityPlan(seed);
+/** Kollision: Dach nie, offenes Türblatt nie (Flag DOOROPEN), sonst alles. Rein aus den Flags, darum auch im Worker. */
+export const blocks = (x, y, z, l) => !(l & ROOF) && !(l & DOOROPEN);
+
+/** Generator für den Builder der Engine (Worker oder synchron). config = { seed, plan? } */
+export function createGenerator(config) {
+  const plan = config.plan || cityPlan(config.seed);
   const grid = plan.grid;
-  const city = { seed, grid, order: plan.order, buildings: [], lights: [], containers: [], flames: [], doors: [], gapIndex: new Map(), bldAt: new Int16Array(W * D).fill(-1) };
-  const { buildings, lights, containers, flames, doors, gapIndex, bldAt } = city;
-  city.indexDoorGaps = () => { gapIndex.clear(); for (const dr of doors) if (!dr.open && !dr.broken) for (const [x, y] of doorCells(dr).gap) gapIndex.set(y * W + x, dr); };
   const tileKind = (tx, ty) => (tx < 0 || ty < 0 || tx >= GN || ty >= GN) ? null : TILES[grid[ty * GN + tx]];
   const roadDirs = (tx, ty) => [0, 1, 2, 3].filter(d => { const k = tileKind(tx + DIRS[d][0], ty + DIRS[d][1]); return k && k.kind === 'road'; });
-  city.tileKind = tileKind;
-  const c0 = (GN >> 1) * TS + TS / 2;
-  city.spawn = { x: c0 + 0.5, y: c0 + 0.5 };
-
-  const world = new World({
-    tileSize: TS, tilesX: GN, tilesY: GN, height: H, seed, version: GEN_VERSION,
-    // Offenes Türblatt blockiert nicht, Dach nie
-    blocks: (x, y, z, l) => !(l & ROOF) && !((l & DOORLEAF) && !gapIndex.has(y * W + x)),
-    generate: (tile, vol, ctx) => generate(tile, vol, ctx),
-  });
-  city.world = world;
+  return { tileSize: TS, tilesX: GN, tilesY: GN, height: H, version: GEN_VERSION, blocks, generate };
 
   function generate(tile, vol, ctx) {
-  const key = tile.key, tx = tile.tx, ty = tile.ty, first = ctx.first, rng = ctx.rng;
-  if (!tile.doors) tile.doors = [];
+  const key = tile.key, tx = tile.tx, ty = tile.ty, rng = ctx.rng, doorState = (ctx.state && ctx.state.doors) || [];
+  const tileDoors = [];
   const ox = ctx.ox, oy = ctx.oy;
   const S = (x, y, z, c, l = 0) => { if (x >= 0 && y >= 0 && x < TS && y < TS) vol.set(x, y, z, c, l); };
   const box = (x0, y0, x1, y1, z0, z1, c, l = 0) => {
@@ -98,14 +86,13 @@ export function createCity(seed) {
     }
   };
   const grass = (x, y) => { const gx = ox + x, gy = oy + y, h = hash3(gx, gy, 1), n = vnoise(gx / 14, gy / 14, 5); return n > 0.62 ? jit(0x3b3328, 0.3, h) : jit(0x2c3a24, 0.32, h); };
-  const addLight = (x, y, z, r, c, i, type) => { if (first) lights.push({ x: ox + x, y: oy + y, z, r, c, i, type, seed: rng() * 100, tile: key }); };
-  const addCont = (x, y, name, kind, r) => { if (first) containers.push({ x: ox + x, y: oy + y, name, kind, items: null, tile: key, r: r ? [ox + r[0], oy + r[1], ox + r[2] + 1, oy + r[3] + 1] : null }); };
-  const addFlame = (x, y, bz) => { if (first) flames.push({ x: ox + x, y: oy + y, bz, tile: key }); };
+  const addLight = (x, y, z, r, c, i, type) => ctx.add('light', { x: ox + x, y: oy + y, z, r, c, i, type, seed: rng() * 100 });
+  const addCont = (x, y, name, kind, r) => ctx.add('cont', { x: ox + x, y: oy + y, name, kind, r: r ? [ox + r[0], oy + r[1], ox + r[2] + 1, oy + r[3] + 1] : null });
+  const addFlame = (x, y, bz) => ctx.add('flame', { x: ox + x, y: oy + y, bz });
   const addDoor = (x, y, v, swing, opt) => {
-    const r = rng();
-    if (!first) return;
-    const dr = { x: ox + x, y: oy + y, v, swing, open: r < (opt.openP ?? 0.55), broken: r > 0.93, hp: 6, glass: !!opt.glass, col: opt.col ?? 0x6a4a2e, tile: key };
-    doors.push(dr); tile.doors.push(dr);
+    const r = rng(), idx = tileDoors.length, st = doorState[idx];
+    const dr = { x: ox + x, y: oy + y, v, swing, open: st ? st[0] : r < (opt.openP ?? 0.55), broken: st ? st[1] : r > 0.93, hp: st ? st[2] : 6, glass: !!opt.glass, col: opt.col ?? 0x6a4a2e, idx };
+    tileDoors.push(dr); ctx.add('door', dr);
   };
   const t = TILES[grid[key]];
 
@@ -401,7 +388,7 @@ export function createCity(seed) {
       if (x + 13 > gx && x - 10 < gx + w && y + 13 > gy && y - 10 < gy + d) continue;
       if (rng() < 0.5) tree(x, y);
     }
-    if (first) buildings.push({ x0: ox + gx, y0: oy + gy, x1: ox + gx + w - 1, y1: oy + gy + d - 1, kind: 'Haus', rooms: plan.rooms.length, area: (w - 2) * (d - 2) / (VPM * VPM), tile: key });
+    ctx.add('building', { x0: ox + gx, y0: oy + gy, x1: ox + gx + w - 1, y1: oy + gy + d - 1, kind: 'Haus', rooms: plan.rooms.length, area: (w - 2) * (d - 2) / (VPM * VPM) });
   }
 
   // ---------- Laden: Verkauf vorn, dahinter Lager und Büro ----------
@@ -457,7 +444,7 @@ export function createCity(seed) {
     for (let a = mid - 10; a <= mid + 14; a++) { sgn(a, 14); if (a % 2 === 0) sgn(a, 13); }
     const fx = front === 1 ? gx + w + 4 : front === 3 ? gx - 4 : gx + mid + 2.5, fy = front === 0 ? gy - 4 : front === 2 ? gy + d + 4 : gy + mid + 2.5;
     addLight(fx, fy, 13, 40, [((sh[1] >> 16) & 255) / 255, ((sh[1] >> 8) & 255) / 255, (sh[1] & 255) / 255], 1.5, 'neon');
-    if (first) buildings.push({ x0: ox + gx, y0: oy + gy, x1: ox + gx + w - 1, y1: oy + gy + d - 1, kind: sh[0], rooms: 3, area: (w - 2) * (d - 2) / (VPM * VPM), tile: key });
+    ctx.add('building', { x0: ox + gx, y0: oy + gy, x1: ox + gx + w - 1, y1: oy + gy + d - 1, kind: sh[0], rooms: 3, area: (w - 2) * (d - 2) / (VPM * VPM) });
   }
 
   // ---------- Park, Parkplatz, Brache ----------
@@ -503,13 +490,8 @@ export function createCity(seed) {
   else if (t.kind === 'parkplatz') parking();
   else lot();
 
-  // Türen im aktuellen Zustand einsetzen (lokale Koordinaten), Gebäudekarte beim ersten Mal
-  const lset = (x, y, z, c, l = 0) => vol.set(x - ox, y - oy, z, c, l), lget = (x, y, z) => vol.get(x - ox, y - oy, z) ? vol.lay[vol.idx(x - ox, y - oy, z)] : 0;
-  for (const dr of tile.doors) doorVoxels(dr, lset, lget);
-  city.indexDoorGaps();
-  if (first) buildings.forEach((b, k) => { if (b.tile === key) for (let y = b.y0; y <= b.y1; y++) for (let x = b.x0; x <= b.x1; x++) bldAt[y * W + x] = k; });
+  // Türen im (gespeicherten) Zustand einsetzen, lokale Koordinaten
+  const lset = (x, y, z, c, l = 0) => vol.set(x - ox, y - oy, z, c, l), lget = (x, y, z) => vol.getLay(x - ox, y - oy, z);
+  for (const dr of tileDoors) doorVoxels(dr, lset, lget);
   }
-
-  city.inBuilding = (x, y) => { x |= 0; y |= 0; return x >= 0 && y >= 0 && x < W && y < D ? bldAt[y * W + x] : -1; };
-  return city;
 }
