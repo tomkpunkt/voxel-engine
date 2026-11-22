@@ -24,8 +24,11 @@ export class World {
    * @param {number} [o.version]   Generatorversion (Spielstände merken sie sich)
    * @param {(x, y, z, lay) => boolean} [o.blocks]  blockiert ein belegter Voxel die Bewegung? (Standard: alles außer ROOF)
    * @param {[number, number]} [o.blockZ]  z-Bereich, der für Kollision zählt (Standard 1…7)
+   * @param {number} [o.voxelSize]  Kantenlänge eines Blocks in Metern (Grunddichte, z. B. 0.2, 0.1, 0.05)
+   * @param {number} [o.sub]        Unterteilungsfaktor S: ein Block kann zu S³ feinen Blöcken werden (1, 2 oder 4)
    */
   constructor(o) {
+    this.voxelSize = o.voxelSize ?? 0.2; this.sub = o.sub ?? 1;
     this.TS = o.tileSize; this.tilesX = o.tilesX; this.tilesY = o.tilesY; this.H = o.height;
     this.W = this.TS * this.tilesX; this.D = this.TS * this.tilesY;
     this.seed = o.seed | 0; this.version = o.version ?? 1;
@@ -53,13 +56,16 @@ export class World {
     const key = this.key(tx, ty);
     let t = this.grid[key];
     if (!t) {
-      t = { key, tx, ty, vol: null, colH: null, blocked: null, path: null, rev: 0, deltas: new Map(), state: null, data: {}, decals: [], generated: false };
+      t = { key, tx, ty, vol: null, colH: null, blocked: null, path: null, rev: 0, deltas: new Map(), brickDeltas: new Map(), state: null, data: {}, decals: [], generated: false };
       this.grid[key] = t; this.tiles.set(key, t);
     }
     return t;
   }
   /** Deltas einer Kachel als Liste [[i, c, l], …] (für Aufträge an Builder/Worker). */
   deltaList(t) { const out = []; for (const [i, d] of t.deltas) out.push([i, d.c, d.l]); return out; }
+  brickList(t) { const out = []; for (const [i, b] of t.brickDeltas) out.push([i, b.c, b.l]); return out; }
+  /** Meter → Blöcke (gerundet). */
+  m(meters) { return Math.round(meters / this.voxelSize); }
   /** Spielzustand der Kachel geändert (z. B. Tür): Revision erhöhen, damit ältere Aufträge verworfen werden. */
   touch(t) { t.rev++; }
 
@@ -95,7 +101,7 @@ export class World {
     for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
       const x = tx + dx, y = ty + dy; if (!this.inTiles(x, y)) continue;
       const t = this.record(x, y);
-      tiles.push({ tx: x, ty: y, rev: t.rev, state: t.state, deltas: t.deltas.size ? this.deltaList(t) : null });
+      tiles.push({ tx: x, ty: y, rev: t.rev, state: t.state, deltas: t.deltas.size ? this.deltaList(t) : null, bricks: t.brickDeltas.size ? this.brickList(t) : null });
     }
     return { tx, ty, rev: this.record(tx, ty).rev, tiles, bake: !!o.bake, entities: !!o.entities };
   }
@@ -143,7 +149,38 @@ export class World {
     const i = (z * TS + (y % TS)) * TS + (x % TS);
     t.rev++;
     t.deltas.set(i, { c, l: c ? l : 0, rev: t.rev });
+    t.brickDeltas.delete(i);
     if (t.vol) t.vol.setAt(i, c, l);
+  }
+  // ---------------------------------------------------------------- Feine Blöcke (Unterteilung)
+  // Feine Koordinaten: (fx, fy, fz) = Block · S + (0 … S−1). Nur in geladenen Kacheln änderbar.
+  getFine(fx, fy, fz) {
+    const S = this.sub, x = Math.floor(fx / S), y = Math.floor(fy / S), z = Math.floor(fz / S);
+    if (z < 0 || z >= this.H) return 0;
+    const t = this.tileAt(x, y); if (!t || !t.vol) return 0;
+    const TS = this.TS, i = (z * TS + (y % TS)) * TS + (x % TS);
+    return t.vol.getFine(i, fx - x * S, fy - y * S, fz - z * S);
+  }
+  getFineLay(fx, fy, fz) {
+    const S = this.sub, x = Math.floor(fx / S), y = Math.floor(fy / S), z = Math.floor(fz / S);
+    if (z < 0 || z >= this.H) return 0;
+    const t = this.tileAt(x, y); if (!t || !t.vol) return 0;
+    const TS = this.TS, i = (z * TS + (y % TS)) * TS + (x % TS);
+    return t.vol.getFineLay(i, fx - x * S, fy - y * S, fz - z * S);
+  }
+  /** Bleibende Änderung eines feinen Blocks (teilt den Block bei Bedarf). Abfragen erst mit commit() aktuell. */
+  editFine(fx, fy, fz, c, l = 0) {
+    const S = this.sub;
+    if (S === 1) return this.edit(fx, fy, fz, c, l);
+    const x = Math.floor(fx / S), y = Math.floor(fy / S), z = Math.floor(fz / S);
+    if (!this.inside(x, y) || z < 0 || z >= this.H) return;
+    const t = this.tileAt(x, y); if (!t || !t.vol) return;
+    const TS = this.TS, i = (z * TS + (y % TS)) * TS + (x % TS);
+    t.vol.setFine(i, fx - x * S, fy - y * S, fz - z * S, c, l);
+    t.rev++;
+    const bc = t.vol.brickColors(i);
+    if (bc) { t.brickDeltas.set(i, bc); t.deltas.delete(i); }
+    else { t.deltas.set(i, { c: t.vol.colAt(i), l: t.vol.layAt(i), rev: t.rev }); t.brickDeltas.delete(i); }
   }
   /** Mehrere edit()-Aufrufe abschließen: Abfragen im Rechteck aktualisieren und Ereignis senden. */
   commit(x0, y0, x1, y1) { this.updateRegion(x0, y0, x1, y1); }
@@ -221,19 +258,20 @@ export class World {
   /** Alle Änderungen und Spielzustände als JSON-taugliches Objekt. */
   exportDeltas() {
     const tiles = [];
-    for (const t of this.tiles.values()) if (t.deltas.size || t.state) {
-      tiles.push({ tx: t.tx, ty: t.ty, rev: t.rev, state: t.state, d: [...t.deltas].map(([i, v]) => [i, v.c, v.l, v.rev]) });
+    for (const t of this.tiles.values()) if (t.deltas.size || t.brickDeltas.size || t.state) {
+      tiles.push({ tx: t.tx, ty: t.ty, rev: t.rev, state: t.state, d: [...t.deltas].map(([i, v]) => [i, v.c, v.l, v.rev]), b: this.brickList(t) });
     }
-    return { seed: this.seed, version: this.version, tileSize: this.TS, height: this.H, tiles };
+    return { seed: this.seed, version: this.version, tileSize: this.TS, height: this.H, sub: this.sub, tiles };
   }
   /** Änderungen übernehmen. Geladene Kacheln werden verworfen und neu gebaut (Streaming oder ensure()). */
   importDeltas(s) {
-    if (s.seed !== this.seed || s.version !== this.version || s.tileSize !== this.TS || s.height !== this.H)
+    if (s.seed !== this.seed || s.version !== this.version || s.tileSize !== this.TS || s.height !== this.H || (s.sub ?? 1) !== this.sub)
       throw new Error('Spielstand passt nicht zu dieser Welt (Saat, Generatorversion oder Maße)');
     for (const e of s.tiles) {
       const t = this.record(e.tx, e.ty);
       t.rev = Math.max(t.rev, e.rev) + 1; t.state = e.state ?? t.state;
       for (const [i, c, l, rev] of e.d) t.deltas.set(i, { c, l, rev });
+      for (const [i, c, l] of e.b || []) t.brickDeltas.set(i, { c, l });
       if (t.vol) { t.vol = null; t.colH = t.blocked = t.path = null; this.emit('tileUnloaded', t); }
     }
   }

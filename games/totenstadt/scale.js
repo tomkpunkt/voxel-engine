@@ -21,3 +21,4 @@ export const WALL_H = SCALE.raumhoehe, DOOR_H = SCALE.tuer.hoehe, DOOR_W = SCALE
 export const ROOF = FLAG.ROOF, WALLTOP = FLAG.WALLTOP, DOORLEAF = FLAG.GAME0, DOOROPEN = FLAG.GAME1;
 export const DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]];
 export const GEN_VERSION = 4;
+export const SUB = 4;          // Unterteilung: ein 20-cm-Block kann zu 4×4×4 Blöcken à 5 cm werden (Einschüsse, Schläge)

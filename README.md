@@ -16,7 +16,7 @@ python3 -m http.server 8765
 
 ES-Module laden nicht über `file://`, darum braucht es einen lokalen Server.
 
-URL-Parameter für reproduzierbare Bilder: `?saat=4711` (Stadt), `?zeit=12` (Uhrzeit 0–24), `?leer` (Totenstadt ohne Zombies).
+URL-Parameter für reproduzierbare Bilder: `?saat=4711` (Stadt), `?zeit=12` (Uhrzeit 0–24), `?leer` (Totenstadt ohne Zombies), `?dichte=20|10|5` und `?sub=1|2|4` (Kleine Welt), `?ohneWorker`.
 
 ## Aufbau
 
@@ -28,6 +28,7 @@ engine/
   render/     camera.js (freie Kamera), bake.js (Voxel → Texturen), renderer.js (WebGL2), shaders.js, particles.js
   light/      light.js – Tageszeit, Flackern, Lichtauswahl
   ecs/        ecs.js (Entities, Systeme), flowfield.js (Wegfindung)
+  destruct/   debris.js (Block-Partikel, Emitter), destruct.js (carve, shatter, checkSupport, drop)
   gen/        wfc.js (Wave Function Collapse mit Sockeln), floorplan.js (Split-Grammatik)
   platform/   input.js (Tastatur, Maus, Touch, Kamera-Gesten), audio.js (Synth)
   index.js    öffentliche API
@@ -71,11 +72,28 @@ requestAnimationFrame(frame);
 
 Für große Welten steht der Generator in einem eigenen Modul mit `export function createGenerator(config)` und wird über `new WorkerBackend(url, config)` in Workern ausgeführt (siehe `games/totenstadt/city.js` und `stadt.js`). Entities meldet der Generator über `ctx.add(typ, daten)`; die Welt sendet sie einmal pro Kachel als Ereignis `entities`.
 
+## Dichte, Unterteilung, Zerstörung
+
+```js
+const world = new World({ ..., voxelSize: 0.1, sub: 2 });   // Grunddichte 10 cm, Blöcke teilbar in 2×2×2 à 5 cm
+world.m(1.8);                                              // 18 Blöcke
+world.editFine(fx, fy, fz, 0);                             // feinen Block entfernen (teilt bei Bedarf), dann world.commit(…)
+
+const debris = new Debris(world);
+const { removed } = carve(world, x, y, z, world.m(0.4));   // Kugel ausschneiden, Ränder fein
+shatter(debris, removed, { settle: true });                 // Trümmer bleiben liegen
+const { groups } = checkSupport(world, x - 20, y - 20, x + 20, y + 20);
+for (const g of groups) g.length > 300 ? drop(world, g) : shatter(debris, g, { settle: true });
+debris.emitter({ x, y, z, rate: 20, colors: [0xffa030], settle: false });   // z. B. Glut
+// pro Bild: debris.update(dt); debris.commit(); … renderer.drawDebris(debris.list)
+```
+
 ## Wichtige Begriffe
 
 - **Kachel**: quadratischer Weltausschnitt (Totenstadt 80 × 80 × 32 Voxel). Wird aus Saat, Lage, Generatorversion und Spielzustand (`tile.state`) erzeugt; bleibende Änderungen liegen als **Deltas** daneben. Darum darf das Streaming Voxel jederzeit wegwerfen.
 - **Revision**: zählt jede Änderung einer Kachel (`edit`, `touch`). Aufträge an Worker tragen sie; ein Ergebnis zu einer älteren Revision wird verworfen.
-- **Flags** (`FLAG`): 1 Dach, 2 obere Wandhälfte – beide kappt der Renderer im Rechteck `cut` (Gebäude, in dem man steht). Ab 8 gehören die Bits dem Spiel (Totenstadt: Türblatt).
+- **Flags** (`FLAG`): 1 Dach, 2 obere Wandhälfte – beide kappt der Renderer im Rechteck `cut` (Gebäude, in dem man steht). 4 = Stellvertreter eines unterteilten Blocks. Ab 8 gehören die Bits dem Spiel (Totenstadt: Türblatt).
+- **Brick**: ein unterteilter Block, S³ feine Blöcke in derselben Palette. Grob steht ein Stellvertreter (Flag 4), damit Höhe, Kollision und Sicht weiter im groben Gitter rechnen.
 - **Tiefe aus z**: Der Renderer schreibt als Tiefe nur die Höhe der Scheibe. Das ist für jede Drehung und Neigung korrekt, weil an derselben Bildschirmstelle das vordere Objekt immer die höhere Scheibe zeigt (Test in `tests/render-mathe.test.mjs`).
 
 ## Tests

@@ -19,14 +19,14 @@
 
 import { Volume } from '../core/voxel.js';
 import { mulberry32, tileSeed } from '../core/rand.js';
-import { bakeBox, sliceBounds } from '../render/bake.js';
+import { bakeBox, bakeBricks, sliceBounds } from '../render/bake.js';
 import { columnInfo, defaultBlocks } from '../world/world.js';
 
 export class Builder {
   constructor(gen, seed, o = {}) {
     this.gen = gen; this.seed = seed | 0;
     this.TS = gen.tileSize; this.H = gen.height; this.tilesX = gen.tilesX; this.tilesY = gen.tilesY;
-    this.version = gen.version ?? 1;
+    this.version = gen.version ?? 1; this.S = gen.sub ?? 1;
     this.blocks = gen.blocks || defaultBlocks; this.blockZ = gen.blockZ || [1, 7];
     this.sun = o.sun;
     this.cache = new Map(); this.maxCache = o.maxCache ?? 48;
@@ -39,13 +39,14 @@ export class Builder {
     let c = this.cache.get(key);
     if (c && c.rev === info.rev && c.stateKey === JSON.stringify(info.state ?? null)) { c.used = ++this.clock; return c; }
     const t0 = now();
-    const vol = new Volume(this.TS, this.TS, this.H), entities = [];
+    const vol = new Volume(this.TS, this.TS, this.H, this.S), entities = [];
     const ox = info.tx * this.TS, oy = info.ty * this.TS;
     this.gen.generate({ tx: info.tx, ty: info.ty, key, state: info.state ?? null }, vol, {
       rng: mulberry32(tileSeed(this.seed, info.tx, info.ty, this.version)), ox, oy, seed: this.seed, state: info.state ?? null,
       add: (type, data) => entities.push({ type, data }),
     });
     if (info.deltas) for (const [i, col, l] of info.deltas) vol.setAt(i, col, l);
+    if (info.bricks) for (const [i, col, l] of info.bricks) vol.setBrickColors(i, { c: col, l });
     c = { key, tx: info.tx, ty: info.ty, rev: info.rev, stateKey: JSON.stringify(info.state ?? null), vol, entities, used: ++this.clock };
     this.cache.set(key, c);
     this.stats.generated++; this.stats.genMs += now() - t0;
@@ -67,6 +68,18 @@ export class Builder {
     const c = this.cache.get(this.key((x / this.TS) | 0, (y / this.TS) | 0));
     if (!c) return 0;
     const v = c.vol; return v.palL[v.data[(z * this.TS + (y % this.TS)) * this.TS + (x % this.TS)]];
+  }
+  getFine(fx, fy, fz) {
+    const S = this.S, x = Math.floor(fx / S), y = Math.floor(fy / S), z = Math.floor(fz / S);
+    if (z < 0 || z >= this.H || x < 0 || y < 0) return 0;
+    const c = this.cache.get(this.key((x / this.TS) | 0, (y / this.TS) | 0)); if (!c || x >= this.tilesX * this.TS) return 0;
+    return c.vol.getFine((z * this.TS + (y % this.TS)) * this.TS + (x % this.TS), fx - x * S, fy - y * S, fz - z * S);
+  }
+  getFineLay(fx, fy, fz) {
+    const S = this.S, x = Math.floor(fx / S), y = Math.floor(fy / S), z = Math.floor(fz / S);
+    if (z < 0 || z >= this.H || x < 0 || y < 0) return 0;
+    const c = this.cache.get(this.key((x / this.TS) | 0, (y / this.TS) | 0)); if (!c || x >= this.tilesX * this.TS) return 0;
+    return c.vol.getFineLay((z * this.TS + (y % this.TS)) * this.TS + (x % this.TS), fx - x * S, fy - y * S, fz - z * S);
   }
   blockedAt(x, y, own) {
     if (x < 0 || y < 0 || x >= this.tilesX * this.TS || y >= this.tilesY * this.TS) return 1;
@@ -100,6 +113,11 @@ export class Builder {
       const t0 = now(), n = TS * TS * H * 4, A = new Uint8Array(n), B = new Uint8Array(n);
       bakeBox((x, y, z) => this.getC(x, y, z), (x, y, z) => this.getL(x, y, z), ox, oy, TS, TS, H, true, A, B, this.sun);
       out.A = A; out.B = B; out.bb = sliceBounds(c.vol.data, TS, TS, H);
+      if (c.vol.bricks.size) {
+        const keys = Uint32Array.from(c.vol.bricks.keys());
+        const bb = bakeBricks((x, y, z) => this.getFine(x, y, z), (x, y, z) => this.getFineLay(x, y, z), (x, y, z) => this.getC(x, y, z), [...keys], TS, ox, oy, H, this.S, this.sun);
+        out.bricks = { keys, A: bb.A, B: bb.B };
+      }
       this.stats.baked++; this.stats.bakeMs += now() - t0;
     }
     return out;
@@ -111,7 +129,8 @@ const now = () => (typeof performance !== 'undefined' ? performance.now() : Date
 
 /** Übertragbare Puffer eines gepackten Ergebnisses (für postMessage). */
 export function transferList(r) {
-  const l = [r.vol.data.buffer, r.vol.palC.buffer, r.vol.palL.buffer, r.colH.buffer, r.blocked.buffer, r.path.buffer];
+  const l = [r.vol.data.buffer, r.vol.palC.buffer, r.vol.palL.buffer, r.vol.bKeys.buffer, r.vol.bData.buffer, r.colH.buffer, r.blocked.buffer, r.path.buffer];
   if (r.A) l.push(r.A.buffer, r.B.buffer, r.bb.buffer);
+  if (r.bricks) l.push(r.bricks.keys.buffer, r.bricks.A.buffer, r.bricks.B.buffer);
   return l;
 }
