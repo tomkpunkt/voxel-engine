@@ -116,3 +116,9 @@ Wunsch: „Für die Figuren, high-performance Rapier.js engine, based on the rap
 Offen:
 - Rapier im Browser mit Netz ausprobieren (`?ragdoll=rapier` erzwingt es und zeigt Fehler in der Konsole).
 - Ragdolls stoßen nicht gegeneinander; Möbel und Fahrzeuge zählen über die Säulenhöhe.
+
+### Etappe 5 – Weltplaner (in Arbeit)
+
+`cityPlan` wird zu einem Weltplaner; WFC bleibt der lokale Generator. Setting (Dichte, Straßennetz, Landnutzung) und Biom (Boden, Bewuchs, Gewässer) sind getrennt. Ablauf: Kartennetze → Ecken → Kanten (Grenzstreifen) → Sektorflächen; fertige Ränder bleiben fest, ein Sektor darf nur mit einer abgeleiteten Teilsaat neu starten. Erster Durchlauf: suburbaner Ortsrand, gemäßigtes Biom, 4 × 4 Sektoren à 16 × 16 Grundstücke, flaches Gelände, Ausgabe im bestehenden Kachelraster.
+
+Abnahme: Hofzufahrt, zusammenhängendes Feld und durchgehender Waldrand liegen gezielt über Sektorgrenzen; ein Node-Test prüft alle drei für eine feste Liste von Saaten und vergleicht für eine Saat die Erzeugung in umgekehrter Sektorreihenfolge; Kartenansicht mit einblendbaren Sektorgrenzen. Alte Spielstände (Generator v4) bleiben gültig, der alte Stadtplan bleibt unverändert erhalten (Fingerabdruck-Test).

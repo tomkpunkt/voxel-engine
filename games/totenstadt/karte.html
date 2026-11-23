@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weltplan – Karte</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0c0e10; color: #d8d4c8; font: 13px/1.45 ui-monospace, Menlo, Consolas, monospace; display: flex; flex-wrap: wrap; gap: 16px; padding: 14px; }
+  canvas { image-rendering: pixelated; border: 1px solid #2a2d31; max-width: 100%; height: auto; }
+  .panel { max-width: 360px; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  label { display: block; margin: 4px 0; }
+  input[type=number] { width: 90px; background: #15181b; color: inherit; border: 1px solid #333; padding: 2px 4px; }
+  .leg { display: grid; grid-template-columns: 14px 1fr; gap: 3px 6px; margin: 10px 0; }
+  .leg i { width: 12px; height: 12px; display: inline-block; border: 1px solid #0006; }
+  .ok { color: #8fd18f; } .bad { color: #ff7a6a; }
+  #info div { margin: 2px 0; }
+</style>
+</head>
+<body>
+<canvas id="k" width="640" height="640"></canvas>
+<div class="panel">
+  <h1>Weltplan · suburbaner Ortsrand, gemäßigt</h1>
+  <label>Saat <input id="saat" type="number" value="1"> <button id="neu">Zufall</button></label>
+  <label><input id="grenzen" type="checkbox" checked> Sektorgrenzen und Sektortypen</label>
+  <label><input id="stuecke" type="checkbox"> Ecken und Grenzstreifen</label>
+  <label><input id="pruef" type="checkbox" checked> Prüfstellen (Hofzufahrt, Feld, Waldrand)</label>
+  <div class="leg" id="leg"></div>
+  <div id="info"></div>
+  <p><a href="index.html" id="spiel">Diese Welt in Totenstadt öffnen</a></p>
+</div>
+<script type="module" src="karte.js"></script>
+</body>
+</html>
