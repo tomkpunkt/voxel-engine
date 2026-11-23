@@ -509,7 +509,8 @@ function drawOverlay(t, dt) {
 }
 
 // ---- HUD und Minikarte (aus dem Stadtplan, ohne Voxel)
-const KCOL = { road: '#3a3c42', haus: '#8a5a3a', laden: '#3a7a8a', park: '#3a6a2a', parkplatz: '#5a5c60', brache: '#5a4a30' };
+const KCOL = { road: '#3a3c42', haus: '#8a5a3a', laden: '#3a7a8a', park: '#3a6a2a', parkplatz: '#5a5c60', brache: '#5a4a30',
+  weg: '#6a5a40', garten: '#3a5a2a', wiese: '#4a5a2a', feld: '#7a6a30', wald: '#1a3a1c', hof: '#9a4a2a', hecke: '#2f4a24' };
 let miniBase = null;
 const MS = 6;                    // Pixel pro Grundstück auf der Grundkarte; die Minikarte zeigt 16 × 16 Grundstücke um die Figur
 function buildMini() {
@@ -683,13 +684,17 @@ function showWfc() {
   };
   tick();
 }
-function newGame(s) {
-  seed = s; running = false;
-  $('stTxt').textContent = `Stadt #${seed % 100000} – Wave Function Collapse …`;
+// ?welt=ortsrand: Welt aus dem Weltplaner (suburbaner Ortsrand, gemäßigt); sonst die Stadt (Generator v4)
+const WELTEN = { ortsrand: { setting: 'suburban', biom: 'gemaessigt' } };
+let welt = WELTEN[params.get('welt')] || null;
+const ortName = () => welt ? 'Ortsrand' : 'Stadt';
+function newGame(s, w = welt) {
+  seed = s; running = false; welt = w;
+  $('stTxt').textContent = `${ortName()} #${seed % 100000} – ${welt ? 'Weltplan: Netze, Ecken, Kanten, Flächen' : 'Wave Function Collapse'} …`;
   $('bPlay').disabled = true;
   setTimeout(async () => {
     if (city && city.backend.terminate) city.backend.terminate();
-    city = createCity(seed, { workers: params.has('ohneWorker') ? false : true }); world = city.world;
+    city = createCity(seed, { workers: params.has('ohneWorker') ? false : true, welt }); world = city.world;
     const sv = pendingSave; pendingSave = null;
     if (sv) { world.importDeltas(sv.world); city.savedContainers = sv.containers; }
     R.attachWorld(world, 5);
@@ -706,11 +711,11 @@ function newGame(s) {
     cam.follow(P.x, P.y); cam.snap();
     await stream.fill(P.x, P.y, (a, n) => { $('stTxt').textContent = `Baue Viertel: ${a} / ${n} Grundstücke …`; });
     if (!params.has('leer')) for (let k = 0; k < 55; k++) spawnZombie(60, 999);
-    $('stTxt').textContent = sv ? `Spielstand geladen: Stadt #${seed % 100000}, ${Math.floor(gameTime / 60)} min überlebt.`
-      : `Stadt #${seed % 100000}: ${GN}×${GN} Grundstücke (${Math.round(W / VPM)} m). Es ist Nacht. Finde Waffen und Vorräte – und überlebe.`;
+    $('stTxt').textContent = sv ? `Spielstand geladen: ${ortName()} #${seed % 100000}, ${Math.floor(gameTime / 60)} min überlebt.`
+      : `${ortName()} #${seed % 100000}: ${GN}×${GN} Grundstücke (${Math.round(W / VPM)} m). Es ist Nacht. Finde Waffen und Vorräte – und überlebe.`;
     $('bPlay').disabled = false;
     $('bLoad').style.display = 'none';
-    if (!sv) loadGame(SAVE).then(x => { if (x) { $('bLoad').style.display = ''; $('bLoad').textContent = `Fortsetzen (Stadt #${x.seed % 100000})`; } });
+    if (!sv) loadGame(SAVE).then(x => { if (x) { $('bLoad').style.display = ''; $('bLoad').textContent = `Fortsetzen (${x.welt ? 'Ortsrand' : 'Stadt'} #${x.seed % 100000})`; } });
   }, 30);
 }
 // =====================================================================
@@ -720,7 +725,7 @@ const SAVE = 'totenstadt';
 function snapshot() {
   const containers = {};
   for (const c of city.containers) if (c.items) containers[c.id] = c.items;
-  return { format: 1, seed, gameTime, kills, world: world.exportDeltas(), containers,
+  return { format: 2, seed, welt, version: world.version, gameTime, kills, world: world.exportDeltas(), containers,
     player: { x: P.x, y: P.y, hp: P.hp, bat: P.bat, st: P.st, light: P.light, weapon: P.weapon, mags: P.mags, aim: P.aim },
     inv, drops: drops.map(d => ({ x: d.x, y: d.y, name: d.name, items: d.items })), corpses: corpses.map(k => leichen.save(k)) };
 }
@@ -733,7 +738,8 @@ let pendingSave = null;
 async function continueGame() {
   const sv = await loadGame(SAVE);
   if (!sv) return;
-  pendingSave = sv; newGame(sv.seed);
+  // Speicherformat 1 kennt nur die Stadt (Generator v4); ab Format 2 steht die Welt im Spielstand
+  pendingSave = sv; newGame(sv.seed, sv.welt || null);
 }
 function applySaveAfterLoad(sv) {
   Object.assign(P, sv.player); P.rot = P.aim; inv = sv.inv; gameTime = sv.gameTime; kills = sv.kills;

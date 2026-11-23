@@ -5,6 +5,7 @@ import { wfc } from '../../engine/gen/wfc.js';
 import { planRooms } from '../../engine/gen/floorplan.js';
 import { hash3, vnoise, mulberry32, pick, ri } from '../../engine/core/rand.js';
 import { C, E, shade, jit } from '../../engine/core/voxel.js';
+import { BIOME } from './biome.js';
 import { VPM, M, SCALE, TS, GN, W, D, H, WALL_H, DOOR_H, DOOR_W, CLEAR, ROOF, WALLTOP, DOORLEAF, DOOROPEN, DIRS, GEN_VERSION, SUB } from './scale.js';
 
 // ---- Kacheltypen und Sockel
@@ -23,6 +24,17 @@ TILES.push({ kind: 'haus', mask: 0, w: 18 }, { kind: 'laden', mask: 0, w: 4 }, {
   { kind: 'parkplatz', mask: 0, w: 2 }, { kind: 'brache', mask: 0, w: 2 });
 export const SOCK = TILES.map(t => [0, 1, 2, 3].map(d => t.kind !== 'road' ? SL : (t.mask >> d & 1) ? (t.deg >= 3 ? SJ : SR) : SF));
 const CROSS = TILES.findIndex(t => t.mask === 15);
+/** Zahl der Kacheltypen des alten Stadtplans (Generator v4). Neue Typen nur dahinter anhängen. */
+export const OLD_TILES = TILES.length;
+const OLD_W = TILES.map(t => t.w);
+// Weltplaner (Generator v5): Wirtschaftswege, Gärten, Wiesen, Felder, Wald, Höfe (Zufahrt aus einer Richtung)
+for (let m = 1; m < 16; m++) {
+  const deg = (m & 1) + (m >> 1 & 1) + (m >> 2 & 1) + (m >> 3 & 1);
+  TILES.push({ kind: 'weg', mask: m, deg, w: 0 });
+}
+TILES.push({ kind: 'garten', mask: 0, w: 0 }, { kind: 'wiese', mask: 0, w: 0 }, { kind: 'feld', mask: 0, w: 0 }, { kind: 'wald', mask: 0, w: 0 });
+for (const m of [1, 2, 4, 8]) TILES.push({ kind: 'hof', mask: m, deg: 1, w: 0 });
+TILES.push({ kind: 'hecke', mask: 0, w: 0 });   // Feldrain: Wiesenstreifen mit Hecke, verbindet sich mit Nachbar-Hecken
 
 /** Stadtplan: bester von bis zu 80 WFC-Läufen (Straßenanteil nahe 30 %). */
 export function cityPlan(seed, n = GN) {
@@ -30,7 +42,7 @@ export function cityPlan(seed, n = GN) {
   let res = null, bestErr = 9;
   const tries0 = n > 24 ? 12 : 80;
   for (let tries = 0; tries < tries0; tries++) {
-    const r = wfc(n, rng, { weights: TILES.map(t => t.w), sockets: SOCK, compat: COMPAT, border: s => s >= SF, seed: { cell: (n >> 1) * n + (n >> 1), tile: CROSS } });
+    const r = wfc(n, rng, { weights: OLD_W, sockets: SOCK, compat: COMPAT, border: s => s >= SF, seed: { cell: (n >> 1) * n + (n >> 1), tile: CROSS } });
     if (!r) continue;
     const err = Math.abs(r.grid.filter(t => TILES[t].kind === 'road').length / (n * n) - 0.3);
     if (err < bestErr) { bestErr = err; res = r; }
@@ -73,7 +85,8 @@ export function createGenerator(config) {
   const grid = plan.grid;
   const tileKind = (tx, ty) => (tx < 0 || ty < 0 || tx >= GN || ty >= GN) ? null : TILES[grid[ty * GN + tx]];
   const roadDirs = (tx, ty) => [0, 1, 2, 3].filter(d => { const k = tileKind(tx + DIRS[d][0], ty + DIRS[d][1]); return k && k.kind === 'road'; });
-  return { tileSize: TS, tilesX: GN, tilesY: GN, height: H, version: GEN_VERSION, sub: SUB, voxelSize: 1 / VPM, blocks, generate };
+  const bio = plan.biom ? BIOME[plan.biom] : BIOME.gemaessigt;
+  return { tileSize: TS, tilesX: GN, tilesY: GN, height: H, version: plan.version || GEN_VERSION, sub: SUB, voxelSize: 1 / VPM, blocks, generate };
 
   function generate(tile, vol, ctx) {
   const key = tile.key, tx = tile.tx, ty = tile.ty, rng = ctx.rng, doorState = (ctx.state && ctx.state.doors) || [];
@@ -483,11 +496,187 @@ export function createGenerator(config) {
     if (rng() < 0.5) crate(64, 58, 5, 'Holzkiste', 'kiste');
   }
 
+  // =====================================================================
+  //  Weltplan-Kacheln (Generator v5): Wirtschaftsweg, Garten, Wiese/Hecke, Feld, Wald, Hof
+  // =====================================================================
+  const kindAt = (dx, dy) => { const k = tileKind(tx + dx, ty + dy); return k ? k.kind : null; };
+  const nbKind = d => kindAt(DIRS[d][0], DIRS[d][1]);
+  const lawn = (x, y, pal = bio.gras) => { const gx = ox + x, gy = oy + y, h = hash3(gx, gy, 1); return jit(vnoise(gx / 9, gy / 9, 5) > 0.55 ? pal[1] : pal[0], 0.3, h); };
+  // Schotterweg 3 m breit mit Fahrspuren und Grasnarbe in der Mitte
+  function weg(m) {
+    const lo = 32, hi = 47, mid = 39.5;
+    const on = (x, y) => (x >= lo && x <= hi && y >= lo && y <= hi) || ((m & 1) && x >= lo && x <= hi && y < lo) || ((m & 2) && y >= lo && y <= hi && x > hi)
+      || ((m & 4) && x >= lo && x <= hi && y > hi) || ((m & 8) && y >= lo && y <= hi && x < lo);
+    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
+      const gx = ox + x, gy = oy + y, h = hash3(gx, gy, 3);
+      if (!on(x, y)) { S(x, y, 0, C(lawn(x, y, bio.wiese))); if (h < 0.05) S(x, y, 1, C(jit(bio.wiese[2], 0.3, h))); continue; }
+      const across = (m & 5) && x >= lo && x <= hi && (y < lo || y > hi) ? x : y;
+      const t = Math.abs(across - mid);
+      const c = t < 1.6 ? jit(bio.wiese[0], 0.3, h) : t < 4.5 ? jit(shade(bio.schotter, 0.78), 0.2, h) : jit(bio.schotter, 0.25, h);
+      S(x, y, 0, C(c));
+    }
+  }
+  // Hecke entlang einer Kachelseite (Feldrain, Gartengrenze)
+  function hedge(d, hgt = 6, gap = 0.06) {
+    for (let k = 0; k < TS; k++) for (let w = 0; w < 3; w++) {
+      const x = d === 1 ? TS - 1 - w : d === 3 ? w : k, y = d === 0 ? w : d === 2 ? TS - 1 - w : k, gx = ox + x, gy = oy + y;
+      if (vnoise(gx / 5, gy / 5, 41) < gap * 4 && hash3(gx, gy, 42) < 0.8) continue;
+      const top = hgt - (w === 1 ? 0 : 1) + Math.round(vnoise(gx / 3, gy / 3, 43) * 2);
+      for (let z = 1; z <= top; z++) S(x, y, z, C(jit(z < 2 ? bio.stamm : (hash3(gx, gy, z) < 0.5 ? bio.hecke[0] : bio.hecke[1]), 0.3, hash3(gx, gy, z + 5))));
+    }
+  }
+  function wiese() {
+    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
+      const gx = ox + x, gy = oy + y, h = hash3(gx, gy, 6);
+      S(x, y, 0, C(lawn(x, y, bio.wiese)));
+      if (h < 0.2) S(x, y, 1, C(jit(bio.wiese[h < 0.1 ? 1 : 2], 0.35, h)));
+      if (h > 0.996) S(x, y, 1, C(bio.blumen[(h * 1000 | 0) % bio.blumen.length]));
+    }
+    // Hecke dort, wo Feld und Wald an diese Wiese stoßen (Feldrain → Hecke → Waldrand)
+    const sides = [0, 1, 2, 3].map(nbKind);
+    if (sides.includes('wald')) sides.forEach((k, d) => { if (k === 'feld') hedge(d); });
+    if (rng() < 0.25) tree(10 + ri(rng, 0, 55), 10 + ri(rng, 0, 55));
+  }
+  function garten() {
+    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
+      const gx = ox + x, gy = oy + y, h = hash3(gx, gy, 7);
+      const beet = x > 46 && x < 70 && y > 12 && y < 30 && (y % 4 < 2);
+      S(x, y, 0, C(beet ? jit(0x4a3626, 0.2, h) : lawn(x, y)));
+      if (beet && h < 0.5) S(x, y, 1, C(jit(0x4a6a2a, 0.35, h)));
+    }
+    // Gartenhecke zu Feld, Wiese und Weg hin
+    [0, 1, 2, 3].forEach(d => { const k = nbKind(d); if (k === 'feld' || k === 'wiese' || k === 'weg') hedge(d, 5, 0.03); });
+    if (rng() < 0.6) {   // Gartenhaus 3 × 2,4 m mit Werkzeugkiste
+      const x0 = 14 + ri(rng, 0, 30), y0 = 46 + ri(rng, 0, 14), wx = 15, wy = 12, col = pick(rng, [0x6a4a2e, 0x4a5a3a, 0x7a3a2a]);
+      box(x0, y0, x0 + wx - 1, y0 + wy - 1, 1, 11, (x, y, z) => (x === x0 || x === x0 + wx - 1 || y === y0 || y === y0 + wy - 1) && !(y === y0 && x > x0 + 4 && x < x0 + 10 && z < 10) ? C(jit(col, 0.15, hash3(ox + x, oy + y, z))) : undefined);
+      hipRoof(x0, y0, x0 + wx - 1, y0 + wy - 1, 12, 0x3a3e46);
+      crate(x0 + 3, y0 + 4, 4, 'Werkzeugkiste', 'kiste');
+      ctx.add('building', { x0: ox + x0, y0: oy + y0, x1: ox + x0 + wx - 1, y1: oy + y0 + wy - 1, kind: 'Gartenhaus', rooms: 1, area: (wx - 2) * (wy - 2) / (VPM * VPM) });
+    }
+    for (const [x, y] of [[8, 8], [60, 52], [30, 30]]) if (rng() < 0.45) tree(x, y);
+  }
+  // Feldrain: Wiesenstreifen, Hecke durch die Mitte zu den Nachbar-Hecken (so entstehen durchgehende Hecken)
+  function hecke() {
+    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
+      const gx = ox + x, gy = oy + y, h = hash3(gx, gy, 6);
+      S(x, y, 0, C(lawn(x, y, bio.wiese))); if (h < 0.25) S(x, y, 1, C(jit(bio.wiese[1], 0.35, h)));
+    }
+    const nb = [0, 1, 2, 3].map(d => nbKind(d) === 'hecke');
+    const arms = nb.some(Boolean) ? nb : [nb[0] || true, nb[1], nb[2] || true, nb[3]];
+    const seg = (x0, y0, x1, y1) => {
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+        const gx = ox + x, gy = oy + y; if (hash3(gx >> 2, gy >> 2, 44) < 0.06) continue;
+        const top = 5 + Math.round(vnoise(gx / 4, gy / 4, 43) * 3);
+        for (let z = 1; z <= top; z++) S(x, y, z, C(jit(z < 2 ? bio.stamm : (hash3(gx, gy, z) < 0.5 ? bio.hecke[0] : bio.hecke[1]), 0.3, hash3(gx, gy, z + 5))));
+      }
+    };
+    const a = 38, b = 41;
+    seg(a, a, b, b);
+    if (arms[0]) seg(a, 0, b, a); if (arms[2]) seg(a, b, b, TS - 1); if (arms[3]) seg(0, a, a, b); if (arms[1]) seg(b, a, TS - 1, b);
+    for (let k = 0; k < 2; k++) if (rng() < 0.35) { const along = 8 + ri(rng, 0, 60), v = arms[0] || arms[2]; tree(v ? a - 1 : along, v ? along : a - 1); }
+  }
+  // Feld: Frucht und Reihenrichtung aus großräumigem Rauschen, damit ein Schlag über mehrere Kacheln gleich aussieht
+  function feld() {
+    // Frucht und Reihenrichtung je Parzelle (aus dem Plan), sonst aus großräumigem Rauschen
+    const sc = plan.seed % 997, pid = plan.parcelOf ? plan.parcelOf[ty * GN + tx] : -1;
+    const fi = pid >= 0 ? (pid * 7 + sc) % bio.feld.length : Math.floor(vnoise(tx / 4.5, ty / 4.5, sc) * bio.feld.length * 0.999), fr = bio.feld[Math.min(bio.feld.length - 1, fi)];
+    const rowsX = pid >= 0 ? ((pid * 13 + sc) >> 1) % 2 === 0 : vnoise(tx / 6, ty / 6, sc + 3) > 0.5;
+    const rand = [0, 1, 2, 3].map(d => nbKind(d) !== 'feld');
+    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
+      const gx = ox + x, gy = oy + y, h = hash3(gx, gy, 8);
+      const edge = (rand[0] && y < 3) || (rand[2] && y > TS - 4) || (rand[3] && x < 3) || (rand[1] && x > TS - 4);
+      if (edge) { S(x, y, 0, C(lawn(x, y, bio.wiese))); if (h < 0.3) S(x, y, 1, C(jit(bio.wiese[1], 0.3, h))); continue; }
+      const row = (rowsX ? gy : gx) % 3 === 0;
+      S(x, y, 0, C(jit(row ? shade(fr.boden, 0.85) : fr.boden, 0.18, h)));
+      if (fr.hoch && !row) for (let z = 1; z <= fr.hoch - (h < 0.3 ? 1 : 0); z++) S(x, y, z, C(jit(fr.pflanze, 0.22, hash3(gx, gy, z + 8))));
+    }
+    if (rng() < 0.08) crate(ri(rng, 10, 60), ri(rng, 10, 60), 6, 'Strohballen', 'kiste');
+  }
+  // Wald: Bäume auf einem Raster in Weltkoordinaten; Kronen aus Nachbar-Waldkacheln ragen herein (keine Schnittkanten)
+  const TREE_STEP = 13;
+  function waldBaum(px, py) {
+    const h = hash3(px, py, 51), th = 12 + Math.floor(h * 6), r = 5.5 + hash3(px, py, 52) * 3, cz = th + r - 2;
+    const leaf = bio.laub[Math.floor(hash3(px, py, 53) * bio.laub.length)];
+    const lx = px - ox, ly = py - oy;
+    if (lx >= -1 && ly >= -1 && lx < TS + 1 && ly < TS + 1) for (let z = 1; z <= th; z++) for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) S(lx + dx, ly + dy, z, C(jit(bio.stamm, 0.2, hash3(px + dx, py + dy, z))));
+    const R = Math.ceil(r) + 1;
+    for (let z = Math.max(th - 2, Math.floor(cz - r)); z <= cz + r && z < H; z++) for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+      const x = lx + dx, y = ly + dy; if (x < 0 || y < 0 || x >= TS || y >= TS) continue;
+      const d = Math.hypot(dx - 0.5, dy - 0.5, (z - cz) * 1.3);
+      if (d < r - hash3(px + dx, py + dy, z) * 1.6 && vol.get(x, y, z) === 0) S(x, y, z, C(jit(leaf, 0.4, hash3(px + dx, py + dy, z + 3))));
+    }
+  }
+  function wald() {
+    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
+      const gx = ox + x, gy = oy + y, h = hash3(gx, gy, 9);
+      S(x, y, 0, C(jit(vnoise(gx / 6, gy / 6, 31) > 0.5 ? bio.waldboden[0] : bio.waldboden[1], 0.3, h)));
+      if (h < 0.06) for (let z = 1; z <= 1 + (h < 0.02 ? 1 : 0); z++) S(x, y, z, C(jit(bio.hecke[1], 0.35, h)));   // Unterholz
+    }
+    const g0x = Math.floor((ox - 10) / TREE_STEP), g1x = Math.floor((ox + TS + 10) / TREE_STEP), g0y = Math.floor((oy - 10) / TREE_STEP), g1y = Math.floor((oy + TS + 10) / TREE_STEP);
+    for (let gy = g0y; gy <= g1y; gy++) for (let gx = g0x; gx <= g1x; gx++) {
+      const px = gx * TREE_STEP + Math.floor(hash3(gx, gy, 54) * (TREE_STEP - 4)) + 2, py = gy * TREE_STEP + Math.floor(hash3(gx, gy, 55) * (TREE_STEP - 4)) + 2;
+      const owner = tileKind(Math.floor(px / TS), Math.floor(py / TS));
+      if (!owner || owner.kind !== 'wald' || hash3(gx, gy, 56) < 0.12) continue;
+      const lx = px % TS, ly = py % TS;   // Bäume nicht direkt an den Rand zu Nicht-Wald setzen
+      if (owner === t && ((lx < 6 && nbKind(3) !== 'wald') || (lx > TS - 7 && nbKind(1) !== 'wald') || (ly < 6 && nbKind(0) !== 'wald') || (ly > TS - 7 && nbKind(2) !== 'wald'))) continue;
+      if (owner !== t) {
+        const otx = Math.floor(px / TS), oty = Math.floor(py / TS), ok2 = (dx, dy) => { const k = tileKind(otx + dx, oty + dy); return k && k.kind === 'wald'; };
+        if ((lx < 6 && !ok2(-1, 0)) || (lx > TS - 7 && !ok2(1, 0)) || (ly < 6 && !ok2(0, -1)) || (ly > TS - 7 && !ok2(0, 1))) continue;
+      }
+      waldBaum(px, py);
+    }
+    if (rng() < 0.12) crate(ri(rng, 10, 60), ri(rng, 10, 60), 5, 'Holzstapel', 'kiste');
+  }
+  // Hof: Wohnhaus zur Zufahrt, Scheune dahinter, Schotterhof
+  function hof(m) {
+    const front = [0, 1, 2, 3].find(d => m >> d & 1) ?? 2;
+    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) S(x, y, 0, C(lawn(x, y)));
+    const w = SCALE.haus.min, d = SCALE.haus.min, set = 8;
+    // Wohnhaus an der Zufahrtsseite, links davon; Scheune an der Gegenseite
+    let gx = 6, gy = 6;
+    if (front === 0) gy = set; if (front === 2) gy = TS - set - d; if (front === 3) gx = set; if (front === 1) gx = TS - set - w;
+    if (front === 0 || front === 2) gx = 4; else gy = 4;
+    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {   // Schotterhof zwischen Zufahrt, Haus und Scheune
+      const along = front === 0 || front === 2 ? x : y, across = front === 0 ? y : front === 2 ? TS - 1 - y : front === 3 ? x : TS - 1 - x;
+      if ((along >= 32 && along <= 47 && across < 40) || (along > 40 && across > 6 && across < 48)) S(x, y, 0, C(jit(bio.schotter, 0.25, hash3(ox + x, oy + y, 12))));
+    }
+    const plan2 = planRooms(rng, w, d, front, PLAN_OPT);
+    const lit = rng() < 0.5; for (const r of plan2.rooms) r.lit = lit && rng() < 0.5;
+    const sid = pick(rng, [0xd8d0c0, 0xc8b8a0, 0xe0d8c8]);
+    buildPlan(plan2, gx, gy, { trim: 0x6a4a2e, lit, lightC: [1.0, 0.78, 0.5], doorC: 0x5a3a22, wall: (X, Y, z) => z % 3 === 0 ? shade(sid, 0.85) : jit(sid, 0.06, hash3(X, Y, z)) });
+    hipRoof(gx, gy, gx + w - 1, gy + d - 1, WALL_H + 1, 0x7a2a22);
+    ctx.add('building', { x0: ox + gx, y0: oy + gy, x1: ox + gx + w - 1, y1: oy + gy + d - 1, kind: 'Hof', rooms: plan2.rooms.length, area: (w - 2) * (d - 2) / (VPM * VPM) });
+    // Scheune 6 × 7 m, Holz, offenes Tor zum Hof
+    const bw = 30, bd = 34;
+    const back = (front + 2) % 4;
+    let sx = TS - 4 - bw, sy = TS - 4 - bd;
+    if (back === 0) sy = 4; if (back === 3) sx = 4;
+    if (front === 0 || front === 2) sx = TS - 4 - bw; else sy = TS - 4 - bd;
+    const tor = (x, y) => { const c = back === 0 ? y === sy + bd - 1 : back === 2 ? y === sy : back === 3 ? x === sx + bw - 1 : x === sx; const a = back === 0 || back === 2 ? x - sx : y - sy; return c && a > 8 && a < 21; };
+    box(sx, sy, sx + bw - 1, sy + bd - 1, 1, WALL_H + 2, (x, y, z) => {
+      const wall = x === sx || x === sx + bw - 1 || y === sy || y === sy + bd - 1;
+      if (!wall) return z === 1 && hash3(ox + x, oy + y, 13) < 0.25 ? C(jit(0xb09a4a, 0.3, hash3(ox + x, oy + y, 14))) : undefined;
+      if (tor(x, y) && z < WALL_H) return undefined;
+      return C(jit((x + y) % 4 === 0 ? 0x5a2018 : 0x7a2a20, 0.12, hash3(ox + x, oy + y, z))) ;
+    }, 0);
+    hipRoof(sx, sy, sx + bw - 1, sy + bd - 1, WALL_H + 3, 0x4a4c50);
+    crate(sx + 4, sy + 4, 6, 'Futterkiste', 'kiste'); if (rng() < 0.6) crate(sx + bw - 10, sy + bd - 10, 6, 'Werkzeugkiste', 'kiste');
+    ctx.add('building', { x0: ox + sx, y0: oy + sy, x1: ox + sx + bw - 1, y1: oy + sy + bd - 1, kind: 'Scheune', rooms: 1, area: (bw - 2) * (bd - 2) / (VPM * VPM) });
+    if (rng() < 0.7) lamp(front === 1 ? TS - 6 : front === 3 ? 5 : 30, front === 0 ? 5 : front === 2 ? TS - 6 : 30, 40, 40);
+  }
+
   if (t.kind === 'road') road(t.mask);
   else if (t.kind === 'haus') house();
   else if (t.kind === 'laden') shop();
   else if (t.kind === 'park') park();
   else if (t.kind === 'parkplatz') parking();
+  else if (t.kind === 'weg') weg(t.mask);
+  else if (t.kind === 'wiese') wiese();
+  else if (t.kind === 'garten') garten();
+  else if (t.kind === 'feld') feld();
+  else if (t.kind === 'wald') wald();
+  else if (t.kind === 'hof') hof(t.mask);
+  else if (t.kind === 'hecke') hecke();
   else lot();
 
   // Türen im (gespeicherten) Zustand einsetzen, lokale Koordinaten

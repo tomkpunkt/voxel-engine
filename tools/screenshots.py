@@ -23,6 +23,10 @@ SZENEN = [
     ('totenstadt-mittag', '/games/totenstadt/index.html?saat=4711&leer&zeit=12', {'yaw': 45, 'pitch': 52}, None),
     ('totenstadt-haus', '/games/totenstadt/index.html?saat=4711&leer', {'yaw': 45, 'pitch': 60, 'zoom': 1.6}, 'haus'),
     ('totenstadt-ragdoll', '/games/totenstadt/index.html?saat=4711&zeit=12&ragdoll=verlet', {'yaw': 45, 'pitch': 55, 'zoom': 2.5}, 'ragdoll'),
+    ('ortsrand-ort', '/games/totenstadt/index.html?welt=ortsrand&saat=4711&zeit=11&leer&ragdoll=aus', {'yaw': 35, 'pitch': 55}, None),
+    ('ortsrand-hof', '/games/totenstadt/index.html?welt=ortsrand&saat=4711&zeit=11&leer&ragdoll=aus', {'yaw': 35, 'pitch': 55}, 'hof'),
+    ('weltplan-karte', '/games/totenstadt/karte.html?saat=4711', None, None),
+    ('weltplan-karte-stuecke', '/games/totenstadt/karte.html?saat=4711&stuecke', None, None),
     ('kleine-welt-tag', '/examples/kleine-welt/index.html?zeit=11', {'yaw': 30, 'pitch': 50}, None),
     ('kleine-welt-abend', '/examples/kleine-welt/index.html?zeit=19.5', {'yaw': 160, 'pitch': 40}, None),
     ('kleine-welt-nacht', '/examples/kleine-welt/index.html?zeit=23', {'yaw': 250, 'pitch': 70}, None),
@@ -44,6 +48,9 @@ RAGDOLL = """(async()=>{const d=TS_DEBUG,P=d.P; for(let i=0;i<100&&d.leichen.bac
   d.zombies.filter(z=>!z.dead).slice(0,2).forEach((z,i)=>{z.x=P.x+4;z.y=P.y-2+i*5;z.rot=Math.PI;d.killZombie(z,1,0,2);});
   d.zombies=[]; await new Promise(r=>setTimeout(r,4000));})()"""
 
+# Spieler zum Hof (zwei Kacheln südlich, damit nicht das Dach weggeschnitten ist)
+HOF = """(()=>{const d=TS_DEBUG,h=d.city.plan.net.hof; d.P.x=(h%64)*80+40.5; d.P.y=((h/64)|0)*80+120.5;})()"""
+
 async def main():
     os.makedirs(OUT, exist_ok=True)
     fehler = 0
@@ -55,7 +62,12 @@ async def main():
             pg.on('pageerror', lambda e: errs.append(str(e)))
             pg.on('console', lambda m: errs.append(m.text) if m.type == 'error' and 'favicon' not in m.text and '404' not in m.text and 'net::' not in m.text else None)   # net::: Rapier-CDN ohne Netz
             await pg.goto(BASE + url)
-            await pg.wait_for_function('window.VE_READY === true || (document.getElementById("bPlay") && !document.getElementById("bPlay").disabled)', timeout=120000)
+            await pg.wait_for_function('window.VE_READY === true || window.KARTE_READY === true || (document.getElementById("bPlay") && !document.getElementById("bPlay").disabled)', timeout=180000)
+            if camv is None:   # Kartenansicht (2D)
+                pfad = os.path.join(OUT, name + '.png')
+                await pg.screenshot(path=pfad)
+                print(json.dumps({'szene': name, 'pruefung': await pg.evaluate("document.getElementById('info').innerText.split('\\n').slice(0,5)"), 'fehler': errs[:3]}, ensure_ascii=False))
+                fehler += len(errs); await pg.close(); continue
             if 'totenstadt' in url:
                 await pg.evaluate("document.getElementById('bPlay').click()")
             if aktion == 'haus':
@@ -64,11 +76,13 @@ async def main():
                 await pg.evaluate(CARPORT)
             if aktion == 'ragdoll':
                 await pg.evaluate(RAGDOLL)
+            if aktion == 'hof':
+                await pg.evaluate(HOF)
             cam = 'TS_DEBUG.cam' if 'totenstadt' in url else 'VE_DEMO.cam'
             js = f"(()=>{{const c={cam}, P=window.TS_DEBUG&&TS_DEBUG.P; if(P) c.follow(P.x,P.y); else if (window.VE_DEMO && VE_DEMO.carport && '{aktion}'==='carport') c.follow((VE_DEMO.carport.x0+VE_DEMO.carport.x1)/2,(VE_DEMO.carport.y0+VE_DEMO.carport.y1)/2); c.target.yaw={camv['yaw']}*Math.PI/180; c.target.pitch={camv['pitch']}*Math.PI/180; " \
                  f"{('c.target.zoom*=' + str(camv['zoom']) + ';') if 'zoom' in camv else ''} c.snap();}})()"
             await pg.evaluate(js)
-            await pg.wait_for_timeout(1800)
+            await pg.wait_for_timeout(9000 if 'welt=' in url else 1800)
             pfad = os.path.join(OUT, name + '.png')
             await pg.screenshot(path=pfad)
             info = await pg.evaluate(f"(()=>{{const r=(window.TS_DEBUG||window.VE_DEMO).R; return {{insts:r.stats.insts, calls:r.stats.calls}}}})()")

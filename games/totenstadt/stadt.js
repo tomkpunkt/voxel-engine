@@ -4,17 +4,20 @@ import { World } from '../../engine/world/world.js';
 import { LocalBackend, WorkerBackend } from '../../engine/stream/streamer.js';
 import { cityPlan, createGenerator, blocks, doorCells, doorVoxels } from './city.js';
 import { TS, GN, H, GEN_VERSION, SUB, VPM } from './scale.js';
+import { weltPlan } from './weltplan.js';
 
 /**
  * @param {number} seed
- * @param {object} [o]  { workers: true|false|Zahl }  false = synchron (Tests, Node)
+ * @param {object} [o]  { workers: true|false|Zahl, welt: null | { setting, biom } }  false = synchron (Tests, Node)
+ *   Ohne welt entsteht die Stadt aus cityPlan (Generator v4, alte Spielstände), mit welt aus dem Weltplaner (v5).
  */
 export function createCity(seed, o = {}) {
-  const plan = cityPlan(seed);
-  const world = new World({ tileSize: TS, tilesX: GN, tilesY: GN, height: H, seed, version: GEN_VERSION, blocks, sub: SUB, voxelSize: 1 / VPM });
-  const city = { seed, world, grid: plan.grid, order: plan.order, buildings: [], lights: [], containers: [], flames: [], doors: [] };
-  const c0 = (GN >> 1) * TS + TS / 2;
-  city.spawn = { x: c0 + 0.5, y: c0 + 0.5 };
+  const plan = o.welt ? weltPlan(seed, o.welt) : cityPlan(seed);
+  const version = plan.version || GEN_VERSION;
+  const world = new World({ tileSize: TS, tilesX: GN, tilesY: GN, height: H, seed, version, blocks, sub: SUB, voxelSize: 1 / VPM });
+  const city = { seed, world, plan, welt: o.welt || null, grid: plan.grid, order: plan.order, buildings: [], lights: [], containers: [], flames: [], doors: [] };
+  const sp = plan.spawn || { tx: GN >> 1, ty: GN >> 1 };
+  city.spawn = { x: sp.tx * TS + TS / 2 + 0.5, y: sp.ty * TS + TS / 2 + 0.5 };
 
   const local = () => { city.backend = new LocalBackend(createGenerator({ seed, plan }), seed); world.builder = city.backend.builder; city.workers = false; };
   city.workers = o.workers !== false && typeof Worker !== 'undefined';
