@@ -510,7 +510,7 @@ function drawOverlay(t, dt) {
 
 // ---- HUD und Minikarte (aus dem Stadtplan, ohne Voxel)
 const KCOL = { road: '#3a3c42', haus: '#8a5a3a', laden: '#3a7a8a', park: '#3a6a2a', parkplatz: '#5a5c60', brache: '#5a4a30',
-  weg: '#6a5a40', garten: '#3a5a2a', wiese: '#4a5a2a', feld: '#7a6a30', wald: '#1a3a1c', hof: '#9a4a2a' };
+  weg: '#6a5a40', garten: '#3a5a2a', wiese: '#4a5a2a', feld: '#7a6a30', wald: '#1a3a1c', hof: '#9a4a2a', hecke: '#2f4a24' };
 let miniBase = null;
 const MS = 6;                    // Pixel pro Grundstück auf der Grundkarte; die Minikarte zeigt 16 × 16 Grundstücke um die Figur
 function buildMini() {

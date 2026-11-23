@@ -117,8 +117,29 @@ Offen:
 - Rapier im Browser mit Netz ausprobieren (`?ragdoll=rapier` erzwingt es und zeigt Fehler in der Konsole).
 - Ragdolls stoßen nicht gegeneinander; Möbel und Fahrzeuge zählen über die Säulenhöhe.
 
-### Etappe 5 – Weltplaner (in Arbeit)
+### Etappe 5 – Weltplaner: erster Durchlauf erledigt (2026-11-23)
 
-`cityPlan` wird zu einem Weltplaner; WFC bleibt der lokale Generator. Setting (Dichte, Straßennetz, Landnutzung) und Biom (Boden, Bewuchs, Gewässer) sind getrennt. Ablauf: Kartennetze → Ecken → Kanten (Grenzstreifen) → Sektorflächen; fertige Ränder bleiben fest, ein Sektor darf nur mit einer abgeleiteten Teilsaat neu starten. Erster Durchlauf: suburbaner Ortsrand, gemäßigtes Biom, 4 × 4 Sektoren à 16 × 16 Grundstücke, flaches Gelände, Ausgabe im bestehenden Kachelraster.
+`cityPlan` wird zu einem Weltplaner; WFC bleibt der lokale Generator. Setting (Dichte, Straßennetz, Landnutzung) und Biom (Boden, Bewuchs, Farben) sind getrennt (`SETTINGS`, `biome.js`). Ausgearbeitet: suburbaner Ortsrand im gemäßigten Biom, 4 × 4 Sektoren à 16 × 16 Grundstücke, flaches Gelände, Ausgabe im bestehenden Kachelraster. Totenstadt: `?welt=ortsrand`; Kartenansicht `games/totenstadt/karte.html` (Sektorgrenzen, Ecken und Grenzstreifen, Prüfstellen einblendbar).
 
-Abnahme: Hofzufahrt, zusammenhängendes Feld und durchgehender Waldrand liegen gezielt über Sektorgrenzen; ein Node-Test prüft alle drei für eine feste Liste von Saaten und vergleicht für eine Saat die Erzeugung in umgekehrter Sektorreihenfolge; Kartenansicht mit einblendbaren Sektorgrenzen. Alte Spielstände (Generator v4) bleiben gültig, der alte Stadtplan bleibt unverändert erhalten (Fingerabdruck-Test).
+Ablauf (`games/totenstadt/weltplan.js`):
+1. **Flächen** unabhängig vom Sektorraster: Ortskern an einer Kartenseite, Wald als zusammenhängende Fläche an der Gegenseite (Ellipse + Rauschen), der Rest Acker. Sektortypen sind nur noch Anzeige (überwiegende Nutzung).
+2. **Kartennetze** (`Netz`, mit den Kachelregeln: keine Berührung außer an Verbindungen, keine zwei Kreuzungen nebeneinander): Landstraße Kartenrand → Ortskern → seitlicher Rand; bis zu zwei Sammelstraßen; Seitenstraßen im Abstand 3 (zwei Hausreihen dazwischen), Paare gleicher Länge werden zu Wohnschleifen, der Rest bleibt Sackgasse. Danach wird das Quartier auf das Einzugsgebiet seiner Straßen zugeschnitten (≤ 2 Zellen) – der Ort endet, wo seine Straßen enden.
+3. **Acker**: vier Parzellen (Voronoi um weit verteilte Saatpunkte, durch Straßen getrennt), Hofgrundstück mit Hofwiese an einer Parzellengrenze, Hofzufahrt und Feldwege entlang der Parzellengrenzen zum Netz, Raine mit Hecke zwischen Parzellen ohne Weg (neue Kachel `hecke`, verbindet sich mit Nachbar-Hecken). Feldfrucht und Reihenrichtung je Parzelle.
+4. **Feste Vorgaben** für WFC: Netz, Felder, Raine, Waldkern. WFC gestaltet nur die Wohnblöcke (keine eigenen Straßen) und die Säume an den Flächengrenzen. Häuser ohne Straße davor werden zu Gärten.
+5. **Ecken → Kanten → Flächen** (`engine/gen/sektoren.js`): Stufen sehen nur frühere Stufen, darum ist das Ergebnis unabhängig von der Reihenfolge. Ecken sind 4 × 4 groß (Kreuzungsblock plus die Zellen, die an zwei Grenzstreifen zugleich grenzen – sonst konnten zwei Streifen, die sich nicht sehen, eine gemeinsame Nachbarzelle unlösbar machen; im ersten Versuch genau so aufgetreten). Ecken und Kanten schauen eine Zelle in die Nachbarflächen. Neustart mit abgeleiteter Teilsaat, feste Ränder bleiben fest; Füllkacheln nur dort, wo sie zu allen vorgegebenen Sockeln passen; `wfcRegion` meldet unvereinbare Randvorgaben einer Zelle als `rand` mit den geforderten Sockeln.
+
+Generatorversion und Speicherformat sind getrennt: Die Stadt bleibt Generator v4 (der alte `wfc` und die ersten 20 Kacheltypen sind unverändert, ein Fingerabdruck-Test sichert Plan und Voxel), der Weltplan ist v5. Spielstände: Format 2 speichert `welt` und `version`; Format-1-Stände laden weiter die Stadt. Der Stadtplan selbst wird nicht gespeichert, sondern aus Saat und Version neu erzeugt.
+
+Abnahme (`tests/weltplan.test.mjs`, `games/totenstadt/pruefung.js`, 8 Saaten):
+- Hofzufahrt: Kartenausgang → Hof über tatsächlich verbundene Straßen- und Wegäste, die Zufahrt quert eine Sektorgrenze.
+- Felder: mindestens vier, jedes behält seine reservierte Fläche (alle Zellen Feld, zusammenhängend), ist über einen angebundenen Weg oder eine Straße erschlossen; mindestens eines über eine Sektorgrenze.
+- Gebäude: jedes Haus, jeder Laden, jeder Parkplatz an einer angebundenen Straße.
+- Straßennetz: 0 kurze Abzweigungen (Stummel an einer Kreuzung), 0 ungeplante Straßenzellen (der Test fand einen Stummel am Ende einer Sammelstraße – behoben).
+- Waldrand kreuzt eine Sektorgrenze ohne Sprung.
+- Umgekehrte Reihenfolge der Stücke ergibt denselben Plan; keine Füllkacheln, keine unvereinbaren Randvorgaben.
+- `npm test`: 46 Tests. `tools/screenshots.py`: neue Szenen Ortsrand (Ort, Hof) und Karte (mit Ecken und Grenzstreifen). Planen dauert 20–160 ms.
+
+Offen:
+- Lichtungen im Wald und ein unregelmäßigerer Waldsaum; Parzellengrenzen verlaufen als Treppen (Voronoi in Manhattan-Abstand) statt gerade.
+- Seitenstraßen nur gerade (Kamm); geschwungene Schleifen, Platz im Ortskern.
+- Settings Großstadt, Urban, Ländlich und weitere Biome; Gelände und Gewässer.

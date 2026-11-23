@@ -40,7 +40,7 @@ const PAIRS = [[R, R], [R, J], [R, W], [J, W], [W, W],
   [B, B], [B, G], [B, O], [G, G], [G, O], [G, H], [O, O], [O, A], [O, D], [O, H], [A, A], [A, H], [D, D], [H, H]];
 export const COMPAT2 = Array.from({ length: 11 }, () => new Array(11).fill(0));
 for (const [a, b] of PAIRS) { COMPAT2[a][b] = 1; COMPAT2[b][a] = 1; }
-const LAND = { haus: B, laden: B, parkplatz: B, garten: G, wiese: O, park: O, brache: O, feld: A, wald: D };
+const LAND = { haus: B, laden: B, parkplatz: B, garten: G, wiese: O, park: O, brache: O, hecke: O, feld: A, wald: D };
 export const SOCK2 = TILES.map(t => [0, 1, 2, 3].map(d => {
   if (t.kind === 'road') return (t.mask >> d & 1) ? (t.deg >= 3 ? J : R) : F;
   if (t.kind === 'weg') return (t.mask >> d & 1) ? W : V;
@@ -52,34 +52,29 @@ const BORDER_OK = s => s !== R && s !== J && s !== W;   // nichts läuft ohne Pl
 const idx = (kind, mask = 0) => TILES.findIndex(t => t.kind === kind && (t.mask || 0) === mask);
 const ROAD = m => idx('road', m), WEG = m => idx('weg', m), HOF = m => idx('hof', m);
 
-/** Gewichte je Sektortyp (Index = Kacheltyp). */
-function weightsFor(typ) {
+/**
+ * Gewichte je Fläche (Index = Kacheltyp). Straßen, Wege, Felder und der Waldkern sind vorab geplant; WFC gestaltet
+ * nur noch die Wohnblöcke zwischen den Straßen und die Säume an den Flächengrenzen.
+ */
+function weightsFor(use) {
   const w = new Float64Array(TILES.length);
   TILES.forEach((t, i) => {
-    const straight = t.mask === 5 || t.mask === 10;
-    if (typ === 'wohn') {
-      // Sammelstraßen: lang und gerade, wenige Kreuzungen, einzelne Stichstraßen
-      if (t.kind === 'road') w[i] = t.deg === 1 ? 0.3 : t.deg === 2 ? (straight ? 3 : 0.35) : t.deg === 3 ? 0.45 : 0.1;
-      else w[i] = { haus: 18, garten: 7, laden: 0.8, park: 1.2, parkplatz: 0.3, wiese: 0.8, brache: 0.2 }[t.kind] || 0;
-      if (t.kind === 'weg') w[i] = t.deg === 2 && straight ? 0.05 : 0;
-    } else if (typ === 'acker') {
-      // große Schläge; Feldwege selten, kurz und gerade (der Hofweg kommt aus dem Netz)
-      w[i] = { feld: 16, wiese: 1.6 }[t.kind] || 0;
-      if (t.kind === 'weg') w[i] = t.deg === 1 ? 0.1 : t.deg === 2 ? (straight ? 0.18 : 0.02) : t.deg === 3 ? 0.01 : 0;
-    } else if (typ === 'wald') {
-      // Wald selbst kommt aus der Landschaftsmaske (fest); dazwischen Lichtungen, wenige Waldwege
-      w[i] = { wiese: 3 }[t.kind] || 0;
-      if (t.kind === 'weg') w[i] = t.deg === 2 ? (straight ? 0.12 : 0.04) : t.deg === 1 ? 0.05 : 0;
-    }
+    if (use === 'wohn') w[i] = { haus: 18, garten: 7, laden: 0.8, park: 1.0, parkplatz: 0.2, wiese: 0.6 }[t.kind] || 0;
+    else if (use === 'acker') w[i] = { feld: 6, wiese: 2 }[t.kind] || 0;          // Saum am Rand des Ackers
+    else if (use === 'wald') w[i] = { wald: 5, wiese: 1.2 }[t.kind] || 0;         // unregelmäßiger Waldsaum
   });
   return w;
 }
 
 // ---------------------------------------------------------------- Hilfen
 const N = GN, K = N / SEKTOR;
-const secOf = (x, y) => [(x / SEKTOR) | 0, (y / SEKTOR) | 0];
 const inMap = (x, y) => x >= 0 && y >= 0 && x < N && y < N;
-/** Dijkstra auf dem Zellraster. step(from, to) → Kosten oder Infinity; goal(i) → true. Liefert Zellpfad oder null. */
+const XY = i => [i % N, (i / N) | 0];
+const secKey = i => `${((i % N) / SEKTOR) | 0},${(((i / N) | 0) / SEKTOR) | 0}`;
+const dirTo = (i, j) => { const dx = (j % N) - (i % N), dy = ((j / N) | 0) - ((i / N) | 0); return DIRS.findIndex(([a, b]) => a === dx && b === dy); };
+const n4 = i => { const x = i % N, y = (i / N) | 0, r = []; for (const [dx, dy] of DIRS) if (inMap(x + dx, y + dy)) r.push((y + dy) * N + x + dx); return r; };
+function countBits(m) { return (m & 1) + (m >> 1 & 1) + (m >> 2 & 1) + (m >> 3 & 1); }
+/** Dijkstra auf dem Zellraster. step(from, to, prevOfFrom) → Kosten oder Infinity; goal(i) → true. */
 function shortest(starts, step, goal) {
   const dist = new Float64Array(N * N).fill(Infinity), prev = new Int32Array(N * N).fill(-1), heap = [];
   const push = (d, i) => { heap.push([d, i]); let k = heap.length - 1; while (k > 0) { const p = (k - 1) >> 1; if (heap[p][0] <= heap[k][0]) break; [heap[p], heap[k]] = [heap[k], heap[p]]; k = p; } };
@@ -89,44 +84,93 @@ function shortest(starts, step, goal) {
     const [d, i] = pop();
     if (d > dist[i]) continue;
     if (goal(i)) { const path = []; for (let k = i; k >= 0; k = prev[k]) path.push(k); return path.reverse(); }
-    const x = i % N, y = (i / N) | 0;
-    for (let dd = 0; dd < 4; dd++) {
-      const nx = x + DIRS[dd][0], ny = y + DIRS[dd][1];
-      if (!inMap(nx, ny)) continue;
-      const j = ny * N + nx, c = step(i, j, prev[i]);
+    for (const j of n4(i)) {
+      const c = step(i, j, prev[i]);
       if (c === Infinity) continue;
       if (d + c < dist[j]) { dist[j] = d + c; prev[j] = i; push(d + c, j); }
     }
   }
   return null;
 }
-const dirTo = (i, j) => { const dx = (j % N) - (i % N), dy = ((j / N) | 0) - ((i / N) | 0); return DIRS.findIndex(([a, b]) => a === dx && b === dy); };
-const n4 = i => { const x = i % N, y = (i / N) | 0, r = []; for (const [dx, dy] of DIRS) if (inMap(x + dx, y + dy)) r.push((y + dy) * N + x + dx); return r; };
-
-// ---------------------------------------------------------------- 1. Sektortypen
-function placeSectors(rng, setting) {
-  const side = Math.floor(rng() * 4);                               // Ortskern an dieser Kartenseite
-  const along = 1 + rng() * 2, depth = 0.9 + rng() * 0.4;
-  const c = [[along, depth], [K - depth, along], [along, K - depth], [depth, along]][side];
-  const types = new Array(K * K).fill('acker');
-  const ctr = s => [(s % K) + 0.5, ((s / K) | 0) + 0.5];
-  const byDist = [...types.keys()].sort((a, b) => Math.hypot(ctr(a)[0] - c[0], ctr(a)[1] - c[1]) - Math.hypot(ctr(b)[0] - c[0], ctr(b)[1] - c[1]));
-  for (const s of byDist.slice(0, setting.anteile.wohn)) types[s] = 'wohn';
-  // Wald: vom fernsten Sektor aus zusammenhängend wachsen, bevorzugt wo das Landschaftsrauschen hoch ist
-  const off = rng() * 100, far = byDist[byDist.length - 1], wald = [far];
-  while (wald.length < setting.anteile.wald) {
-    const cand = [];
-    for (const s of wald) for (const [dx, dy] of DIRS) {
-      const x = (s % K) + dx, y = ((s / K) | 0) + dy, t = y * K + x;
-      if (x < 0 || y < 0 || x >= K || y >= K || wald.includes(t) || types[t] === 'wohn' || cand.includes(t)) continue;
-      cand.push(t);
-    }
-    if (!cand.length) break;
-    cand.sort((a, b) => (vnoise(ctr(b)[0], ctr(b)[1], off) + Math.hypot(ctr(b)[0] - c[0], ctr(b)[1] - c[1]) * 0.3) - (vnoise(ctr(a)[0], ctr(a)[1], off) + Math.hypot(ctr(a)[0] - c[0], ctr(a)[1] - c[1]) * 0.3));
-    wald.push(cand[0]);
+/** Abstand (Zellen, 4er-Nachbarschaft) jeder Zelle zur nächsten Zelle, für die is() nicht gilt (begrenzt). */
+function distInside(is, max = 8) {
+  const d = new Uint8Array(N * N).fill(max), q = [];
+  for (let i = 0; i < N * N; i++) if (!is(i)) { d[i] = 0; q.push(i); }
+  for (let k = 0; k < q.length; k++) for (const j of n4(q[k])) if (d[j] > d[q[k]] + 1) { d[j] = d[q[k]] + 1; q.push(j); }
+  return d;
+}
+function largestComponent(set) {
+  const seen = new Uint8Array(N * N); let best = [];
+  for (let i = 0; i < N * N; i++) if (set[i] && !seen[i]) {
+    const c = [i]; seen[i] = 1;
+    for (let k = 0; k < c.length; k++) for (const j of n4(c[k])) if (set[j] && !seen[j]) { seen[j] = 1; c.push(j); }
+    if (c.length > best.length) best = c;
   }
-  for (const s of wald) types[s] = 'wald';
-  return { types, center: c, side };
+  const out = new Uint8Array(N * N); for (const i of best) out[i] = 1; return out;
+}
+
+// ---------------------------------------------------------------- Netz (Straßen, Wege, Hof)
+/**
+ * Straßen und Wirtschaftswege als Graph auf dem Zellraster. Neue Stücke werden nur angenommen, wenn sie die
+ * Kachelregeln einhalten: keine Berührung außer an Verbindungen (sonst F–F, F–V, V–V), keine zwei Kreuzungen
+ * nebeneinander (J–J).
+ */
+class Netz {
+  constructor() { this.kind = new Uint8Array(N * N); this.mask = new Uint8Array(N * N); this.exit = new Uint8Array(N * N); this.parts = []; }
+  // 1 Straße, 2 Weg, 3 Hof
+  /**
+   * path: Zellen. join0: path[0] ist schon im Netz; joinEnd: das letzte Element ist schon im Netz.
+   * ok(i): darf diese Zelle neu belegt werden?
+   */
+  add(path, kind, { join0 = false, joinEnd = false, ok = () => true, name = '' } = {}) {
+    const n = path.length, isNew = k => !(join0 && k === 0) && !(joinEnd && k === n - 1);
+    if (n < 2) return false;
+    const pos = new Map(path.map((c, k) => [c, k]));
+    if (pos.size !== n) return false;
+    for (let k = 0; k < n; k++) {
+      const c = path[k];
+      if (!isNew(k)) { if (!this.kind[c]) return false; continue; }
+      if (this.kind[c] || !ok(c)) return false;
+      if (k > 0 && dirTo(path[k - 1], c) < 0) return false;
+      for (const q of n4(c)) {
+        if (pos.has(q)) { if (Math.abs(pos.get(q) - k) !== 1) return false; continue; }
+        if (this.kind[q]) return false;                     // berührt das Netz außerhalb einer Verbindung
+      }
+    }
+    if (dirTo(path[n - 2], path[n - 1]) < 0) return false;
+    // Verbindungen: Straße an Straße/Weg, Weg an Straße/Weg/Hof
+    for (const k of [0, n - 1]) if (!isNew(k)) {
+      const c = path[k], kk = this.kind[c];
+      if (kind === 1 && kk !== 1) return false;
+      if (kind === 2 && kk === 3 && countBits(this.mask[c])) return false;   // Hof hat nur eine Zufahrt
+      if (kk === 1 && this.exit[c]) return false;
+    }
+    // übernehmen (vorläufig) und J–J prüfen
+    const old = [];
+    const set = (c, b) => { old.push([c, this.mask[c]]); this.mask[c] |= b; };
+    for (let k = 0; k < n; k++) {
+      if (isNew(k)) this.kind[path[k]] = kind;
+      if (k > 0) set(path[k], 1 << dirTo(path[k], path[k - 1]));
+      if (k < n - 1) set(path[k], 1 << dirTo(path[k], path[k + 1]));
+    }
+    const bad = path.some(c => this.kind[c] === 1 && countBits(this.mask[c]) >= 3 && n4(c).some(q => this.kind[q] === 1 && (this.mask[c] >> dirTo(c, q) & 1) && countBits(this.mask[q]) >= 3));
+    if (bad) {
+      for (let k = old.length - 1; k >= 0; k--) this.mask[old[k][0]] = old[k][1];
+      for (let k = 0; k < n; k++) if (isNew(k)) this.kind[path[k]] = 0;
+      return false;
+    }
+    this.parts.push({ kind, name, cells: path.filter((_, k) => isNew(k)) });
+    return true;
+  }
+  /** Darf an Zelle c ein neuer Ast ansetzen? */
+  canBranch(c, kind) {
+    const kk = this.kind[c];
+    if (!kk || this.exit[c]) return false;
+    if (kk === 3) return kind === 2 && !countBits(this.mask[c]);
+    if (kind === 1 && kk !== 1) return false;
+    if (kk === 1 && countBits(this.mask[c]) + 1 >= 3) return n4(c).every(q => !(this.kind[q] === 1 && (this.mask[c] >> dirTo(c, q) & 1)) || countBits(this.mask[q]) < 3);
+    return true;
+  }
 }
 
 // ---------------------------------------------------------------- Plan
@@ -140,207 +184,280 @@ export function weltPlan(seed, o = {}) {
   const setting = SETTINGS[settingName];
   if (!setting || !setting.fertig) throw new Error(`Setting „${settingName}“ ist noch nicht ausgearbeitet`);
   if (!BIOME[biomName]) throw new Error(`Biom „${biomName}“ unbekannt`);
-  for (let attempt = 0; attempt < 30; attempt++) {
-    const p = tryPlan(seed, attempt, setting, o);
+  const why = {};
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const p = tryPlan(seed, attempt, setting, o, why);
     if (p) return { kind: 'welt', setting: settingName, biom: biomName, seed, version: WELT_VERSION, ...p };
   }
-  throw new Error('Weltplan: kein gültiger Rahmen gefunden');
+  throw new Error('Weltplan: kein gültiger Rahmen gefunden ' + JSON.stringify(why));
 }
 
-function tryPlan(seed, attempt, setting, o) {
-  const rng = mulberry32(subSeed(seed, 77, attempt));
-  const { types, center, side } = placeSectors(rng, setting);
-  const typeAt = (x, y) => { const [sx, sy] = secOf(x, y); return types[sy * K + sx]; };
-  const fixed = new Int32Array(N * N).fill(-1);
-  const road = new Uint8Array(N * N), weg = new Uint8Array(N * N);
-  const exits = [];
+function tryPlan(seed, attempt, setting, o, why) {
+  const fail = r => { why[r] = (why[r] || 0) + 1; return null; };
+  const rng = mulberry32(subSeed(seed, 77, attempt)), off = subSeed(seed, 78, attempt) % 1000;
 
-  // ---- 2a. Landstraße: Kartenrand → Ortskern → gegenüberliegender Rand (keine Berührung mit sich selbst)
-  const ci = Math.min(N - 1, Math.floor(center[1] * SEKTOR)) * N + Math.min(N - 1, Math.floor(center[0] * SEKTOR));
-  const wiggle = subSeed(seed, 78, attempt) % 1000;
-  const cost = j => { const t = typeAt(j % N, (j / N) | 0); return (t === 'wald' ? 5 : t === 'wohn' ? 1 : 1.6) + vnoise((j % N) / 6, ((j / N) | 0) / 6, wiggle) * 1.5; };
-  const edgeCells = s => { const r = []; for (let k = 2; k < N - 2; k++) r.push(s === 0 ? k : s === 1 ? k * N + N - 1 : s === 2 ? (N - 1) * N + k : k * N); return r; };
-  const turn = (a, b, c2) => a >= 0 && dirTo(a, b) !== dirTo(b, c2) ? 3 : 0;
-  const near = (i, set) => n4(i).some(j => set.has(j));
-  const seg1 = shortest(edgeCells(side), (i, j, pi) => cost(j) + turn(pi, i, j), i => i === ci);
-  if (!seg1) return null;
-  const s1 = new Set(seg1.slice(0, -1));
-  const block = new Set([...s1]); for (const i of s1) for (const j of n4(i)) if (j !== ci) block.add(j);
-  const exitSide = (side + 2) % 4, goalEdge = new Set(edgeCells(exitSide));
-  const seg2 = shortest([ci], (i, j, pi) => block.has(j) ? Infinity : cost(j) + turn(pi, i, j), i => goalEdge.has(i));
-  if (!seg2) return null;
-  const roadPath = [...seg1, ...seg2.slice(1)];
-  // Selbstberührung prüfen (nicht aufeinanderfolgende Zellen dürfen nicht benachbart sein)
-  const pos = new Map(roadPath.map((c2, k) => [c2, k]));
-  for (const [c2, k] of pos) for (const j of n4(c2)) if (pos.has(j) && Math.abs(pos.get(j) - k) > 1) return null;
-  const mask = new Uint8Array(N * N);
-  roadPath.forEach((c2, k) => {
-    road[c2] = 1;
-    if (k > 0) mask[c2] |= 1 << dirTo(c2, roadPath[k - 1]);
-    if (k < roadPath.length - 1) mask[c2] |= 1 << dirTo(c2, roadPath[k + 1]);
-  });
-  const outDir = s => s;   // Kartenseite 0 N, 1 O, 2 S, 3 W = Richtung nach draußen
-  mask[roadPath[0]] |= 1 << outDir(side); mask[roadPath[roadPath.length - 1]] |= 1 << outDir(exitSide);
-  exits.push({ cell: roadPath[0], d: outDir(side) }, { cell: roadPath[roadPath.length - 1], d: outDir(exitSide) });
+  // ---- 1. Landnutzung als eigene Flächen (unabhängig vom Sektorraster)
+  const side = Math.floor(rng() * 4), opp = (side + 2) % 4;
+  // lokale Achsen: along entlang der Kartenseite, depth von der Seite ins Innere
+  const toXY = (s, along, depth) => s === 0 ? [along, depth] : s === 1 ? [N - 1 - depth, along] : s === 2 ? [along, N - 1 - depth] : [depth, along];
+  const c = toXY(side, 22 + Math.floor(rng() * 20), 15 + Math.floor(rng() * 4));
+  const f = toXY(opp, 14 + Math.floor(rng() * 36), 10 + Math.floor(rng() * 5));
+  const alongAxis = s => (s === 0 || s === 2) ? [1, 0] : [0, 1];
+  const ell = (x, y, cx, cy, s, ra, rd) => { const [ax, ay] = alongAxis(s), dx = x - cx, dy = y - cy, a = dx * ax + dy * ay, d = dx * ay - dy * ax; return Math.hypot(a / ra, d / rd); };
+  const wohn0 = new Uint8Array(N * N), wald0 = new Uint8Array(N * N);
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const i = y * N + x;
+    if (ell(x, y, c[0], c[1], side, 15, 12.5) + (vnoise(x / 7, y / 7, off) - 0.5) * 0.45 < 1) wohn0[i] = 1;
+    else if (ell(x, y, f[0], f[1], opp, 25, 13) + (vnoise(x / 8, y / 8, off + 5) - 0.5) * 0.6 + (vnoise(x / 3, y / 3, off + 6) - 0.5) * 0.15 < 1) wald0[i] = 1;
+  }
+  const wohnA = largestComponent(wohn0), waldA = largestComponent(wald0);
+  const use = new Array(N * N);
+  for (let i = 0; i < N * N; i++) use[i] = wohnA[i] ? 'wohn' : waldA[i] ? 'wald' : 'acker';
+  let dWohn = distInside(i => use[i] === 'wohn'), dWald = distInside(i => use[i] === 'wald'), dAcker = distInside(i => use[i] === 'acker');
+  const ci = c[1] * N + c[0];
+  if (use[ci] !== 'wohn') return fail('ortskern');
 
-  // ---- 2b. Hof mit Zufahrt: Wirtschaftsweg zur Landstraße, über mindestens eine Sektorgrenze
-  const roadSecs = new Set(roadPath.map(c2 => { const [sx, sy] = secOf(c2 % N, (c2 / N) | 0); return sy * K + sx; }));
-  const roadN = i => n4(i).filter(j => road[j]);
-  const goodJunction = j => road[j] && (mask[j] === 5 || mask[j] === 10) && !exits.some(e => e.cell === j) && roadN(j).every(k => countBits(mask[k]) === 2);
-  const hofCand = [];
-  for (let s = 0; s < K * K; s++) if (types[s] === 'acker' && !roadSecs.has(s)) {
-    const sx = s % K, sy = (s / K) | 0;
-    for (let k = 0; k < 6; k++) {
-      const x = sx * SEKTOR + 3 + Math.floor(rng() * (SEKTOR - 6)), y = sy * SEKTOR + 3 + Math.floor(rng() * (SEKTOR - 6));
-      hofCand.push(y * N + x);
+  const net = new Netz();
+  // ---- 2. Landstraße: Kartenrand → Ortskern → seitlicher Kartenrand (weg vom Wald)
+  const edgeCells = s => { const r = []; for (let k = 3; k < N - 3; k++) r.push(s === 0 ? k : s === 1 ? k * N + N - 1 : s === 2 ? (N - 1) * N + k : k * N); return r; };
+  const cost = j => (use[j] === 'wald' ? 7 : use[j] === 'wohn' ? 1 : 1.4) + vnoise((j % N) / 7, ((j / N) | 0) / 7, off + 9);
+  const turn = (a, b, c2) => a >= 0 && dirTo(a, b) !== dirTo(b, c2) ? 4 : 0;
+  const s1 = shortest(edgeCells(side), (i, j, pi) => cost(j) + turn(pi, i, j), i => i === ci);
+  if (!s1) return fail('landstrasse');
+  const fd = [(side + 1) % 4, (side + 3) % 4].map(s => { const e = edgeCells(s); const m = e[e.length >> 1]; return [s, Math.hypot(m % N - f[0], ((m / N) | 0) - f[1])]; });
+  const exitSide = fd[0][1] > fd[1][1] ? fd[0][0] : fd[1][0], goalEdge = new Set(edgeCells(exitSide));
+  const block = new Set(); for (const i of s1) if (i !== ci) { block.add(i); for (const j of n4(i)) if (j !== ci) block.add(j); }
+  const s2 = shortest([ci], (i, j, pi) => block.has(j) ? Infinity : cost(j) + turn(pi, i, j), i => goalEdge.has(i));
+  if (!s2) return fail('landstrasse');
+  const land = [...s1, ...s2.slice(1)];
+  if (!net.add(land, 1, { name: 'Landstraße' })) return fail('landstrasse-regeln');
+  const e0 = land[0], e1 = land[land.length - 1];
+  net.mask[e0] |= 1 << side; net.mask[e1] |= 1 << exitSide; net.exit[e0] = 1; net.exit[e1] = 1;
+  const exits = [{ cell: e0, d: side }, { cell: e1, d: exitSide }];
+
+  // ---- 3. Wohnquartier: Sammelstraße senkrecht zur Landstraße, Seitenstraßen im Abstand 3, Wohnschleifen
+  const inWohn = (i, m = 1) => use[i] === 'wohn' && dWohn[i] >= m;
+  const ray = (start, d, maxLen, ok) => { const r = []; let [x, y] = XY(start); for (let k = 0; k < maxLen; k++) { x += DIRS[d][0]; y += DIRS[d][1]; if (!inMap(x, y) || !ok(y * N + x)) break; r.push(y * N + x); } return r; };
+  // Sammelstraßen: die längsten geraden Abzweigungen von der Landstraße ins Quartier (höchstens zwei)
+  const sammelListe = [];
+  for (let n = 0; n < 2; n++) {
+    let best = null;
+    for (const j of land) if (use[j] === 'wohn' && net.canBranch(j, 1)) for (let d = 0; d < 4; d++) {
+      if (net.mask[j] >> d & 1) continue;
+      const r = ray(j, d, 20, i => inWohn(i, 2) && !net.kind[i]);
+      if (r.length >= 5 && (!best || r.length > best.r.length)) best = { j, d, r };
     }
+    if (!best) break;
+    let cells = null;
+    for (let L = best.r.length; L >= 5 && !cells; L--) if (net.add([best.j, ...best.r.slice(0, L)], 1, { join0: true, name: 'Sammelstraße' })) cells = best.r.slice(0, L);
+    if (cells) sammelListe.push({ cells, d: best.d });
+    else break;
   }
-  let hof = -1, wegPath = null;
-  for (const h of hofCand) {
-    if (road[h] || near(h, new Set(roadPath))) continue;
-    const path = shortest([h], (i, j) => {
-      if (road[j]) return (goodJunction(j) && roadN(i).length === 1) ? 1 : Infinity;
-      if (roadN(j).length > 1) return Infinity;
-      if (roadN(j).length === 1 && !goodJunction(roadN(j)[0])) return Infinity;
-      const t = typeAt(j % N, (j / N) | 0);
-      return t === 'wohn' ? 9 : t === 'wald' ? 3 : 1 + vnoise((j % N) / 5, ((j / N) | 0) / 5, wiggle + 3);
-    }, i => road[i] === 1);
-    if (!path || path.length < 4) continue;
-    // über eine Sektorgrenze? keine Selbstberührung?
-    const secs = new Set(path.slice(0, -1).map(c2 => secOf(c2 % N, (c2 / N) | 0).join(',')));
-    if (secs.size < 2) continue;
-    const pp = new Map(path.map((c2, k) => [c2, k]));
-    let touch = false;
-    for (const [c2, k] of pp) for (const j of n4(c2)) if (pp.has(j) && Math.abs(pp.get(j) - k) > 1) touch = true;
-    if (touch) continue;
-    hof = h; wegPath = path; break;
-  }
-  if (hof < 0) return null;
-  const junction = wegPath[wegPath.length - 1];
-  const wmask = new Uint8Array(N * N);
-  for (let k = 1; k < wegPath.length - 1; k++) {
-    const c2 = wegPath[k]; weg[c2] = 1;
-    wmask[c2] |= 1 << dirTo(c2, wegPath[k - 1]); wmask[c2] |= 1 << dirTo(c2, wegPath[k + 1]);
-  }
-  mask[junction] |= 1 << dirTo(junction, wegPath[wegPath.length - 2]);
-  const hofDir = dirTo(hof, wegPath[1]);
-  // Kreuzungsabstand: kein J–J
-  for (const c2 of roadPath) if (countBits(mask[c2]) >= 3) for (const j of roadN(c2)) if (countBits(mask[j]) >= 3) return null;
-
-  for (const c2 of roadPath) fixed[c2] = ROAD(mask[c2]);
-  for (let k = 1; k < wegPath.length - 1; k++) fixed[wegPath[k]] = WEG(wmask[wegPath[k]]);
-  fixed[hof] = HOF(1 << hofDir);
-  const net = new Set([...roadPath, ...wegPath]);
-
-  // ---- 3a. Großes Feld über die Grenze zweier Acker-Sektoren
-  let field = null;
-  const pairs = [];
-  for (let s = 0; s < K * K; s++) if (types[s] === 'acker') {
-    const sx = s % K, sy = (s / K) | 0;
-    if (sx + 1 < K && types[s + 1] === 'acker') pairs.push({ v: true, sx, sy });
-    if (sy + 1 < K && types[s + K] === 'acker') pairs.push({ v: false, sx, sy });
-  }
-  for (let t = 0; t < 60 && !field && pairs.length; t++) {
-    const pr = pairs[Math.floor(rng() * pairs.length)];
-    const fw = 6 + Math.floor(rng() * 4), fh = 4 + Math.floor(rng() * 3);
-    const [lw, lh] = pr.v ? [fw, fh] : [fh, fw];
-    const bx = (pr.sx + (pr.v ? 1 : 0)) * SEKTOR, by = (pr.sy + (pr.v ? 0 : 1)) * SEKTOR;
-    const x0 = pr.v ? bx - Math.floor(lw / 2) + Math.floor(rng() * 3) - 1 : pr.sx * SEKTOR + 2 + Math.floor(rng() * (SEKTOR - lw - 4));
-    const y0 = pr.v ? pr.sy * SEKTOR + 2 + Math.floor(rng() * (SEKTOR - lh - 4)) : by - Math.floor(lh / 2) + Math.floor(rng() * 3) - 1;
-    let ok = true;
-    for (let y = y0; y < y0 + lh && ok; y++) for (let x = x0; x < x0 + lw && ok; x++) if (!inMap(x, y) || net.has(y * N + x) || typeAt(x, y) !== 'acker') ok = false;
-    if (ok) field = { x0, y0, x1: x0 + lw, y1: y0 + lh, v: pr.v, boundary: pr.v ? bx : by };
-  }
-  if (!field) return null;
-  for (let y = field.y0; y < field.y1; y++) for (let x = field.x0; x < field.x1; x++) fixed[y * N + x] = idx('feld');
-
-  // ---- 3b. Wald aus dem Landschaftsfeld, mit Abstand zu Nicht-Wald-Sektoren; Waldrand muss eine Wald-Wald-Grenze kreuzen
-  const waldPairs = [];
-  for (let s = 0; s < K * K; s++) if (types[s] === 'wald') {
-    const sx = s % K, sy = (s / K) | 0;
-    if (sx + 1 < K && types[s + 1] === 'wald') waldPairs.push({ v: true, b: (sx + 1) * SEKTOR, lo: sy * SEKTOR, hi: (sy + 1) * SEKTOR });
-    if (sy + 1 < K && types[s + K] === 'wald') waldPairs.push({ v: false, b: (sy + 1) * SEKTOR, lo: sx * SEKTOR, hi: (sx + 1) * SEKTOR });
-  }
-  if (!waldPairs.length) return null;
-  // Vorzeichenbehafteter Abstand zur Waldgrenze (Zellen): positiv in Wald-Sektoren, negativ außerhalb (bis ±6)
-  const sdist = (x, y) => {
-    const inW = typeAt(x, y) === 'wald';
-    for (let r = 1; r <= 6; r++) for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
-      if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
-      const nx = x + dx, ny = y + dy;
-      if (inMap(nx, ny) && (typeAt(nx, ny) === 'wald') !== inW) return inW ? r - 0.5 : 0.5 - r;
+  if (!sammelListe.length) return fail('sammelstrasse');
+  // Seitenstraßen von Sammel- und Landstraße, alle 3 Zellen, beidseitig; Paare gleicher Länge werden zu Schleifen
+  const seiten = [];
+  const branchFrom = (line, d0) => {
+    for (let k = 2; k < line.length; k += 3) for (const d of [(d0 + 1) % 4, (d0 + 3) % 4]) {
+      const j = line[k], end = line[line.length - 1];
+      if (k === line.length - 2 && countBits(net.mask[end]) === 1) continue;   // sonst bliebe ein Stummel von einer Zelle
+      if (!net.canBranch(j, 1) || (net.mask[j] >> d & 1)) continue;
+      const r = ray(j, d, 7, i => inWohn(i, 1) && !net.kind[i]);
+      for (let L = r.length; L >= 2; L--) if (net.add([j, ...r.slice(0, L)], 1, { join0: true, name: 'Wohnstraße' })) { seiten.push({ j, d, cells: r.slice(0, L), k, line }); break; }
     }
-    return inW ? 6 : -6;
   };
-  const nearWohn = (x, y) => { for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) if (inMap(x + dx, y + dy) && typeAt(x + dx, y + dy) === 'wohn') return true; return false; };
-  let forest = null, forestEdge = null;
-  for (let fa = 0; fa < 20 && !forest; fa++) {
-    const off = subSeed(seed, 79, attempt, fa) % 1000;
-    const val = (x, y) => vnoise(x / 7, y / 7, off) * 0.65 + vnoise(x / 3, y / 3, off + 9) * 0.35;
-    const m = new Uint8Array(N * N);
-    // Der Wald folgt dem Landschaftsfeld: tief im Wald-Sektor dicht, an der Grenze ein weicher Übergang, der in
-    // die Nachbaräcker hineinreichen kann (Waldstücke) – so läuft der Rand nicht an der Sektorgrenze entlang.
-    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
-      const i = y * N + x, t = typeAt(x, y);
-      if (t === 'wohn' || net.has(i) || fixed[i] >= 0 || near(i, net) || nearWohn(x, y)) continue;
-      if (field && x >= field.x0 - 1 && x <= field.x1 && y >= field.y0 - 1 && y <= field.y1) continue;
-      const bias = Math.max(-0.3, Math.min(0.16, sdist(x, y) * 0.045));
-      if (val(x, y) + bias > 0.5) m[i] = 1;
-    }
-    // Waldrand kreuzt eine Wald-Wald-Grenze: entlang der Grenze gibt es Wald und Lichtung auf beiden Seiten gleich
-    for (const wp of waldPairs) {
-      let both = 0, none = 0, mism = 0;
-      for (let k = wp.lo + 2; k < wp.hi - 2; k++) {
-        const a = wp.v ? m[k * N + wp.b - 1] : m[(wp.b - 1) * N + k], b = wp.v ? m[k * N + wp.b] : m[wp.b * N + k];
-        if (a && b) both++; else if (!a && !b) none++; else mism++;
-      }
-      if (both >= 3 && none >= 2 && mism <= 3) { forest = m; forestEdge = wp; break; }
-    }
+  for (const sm of sammelListe) branchFrom(sm.cells, sm.d);
+  for (let k = 0; k < land.length - 1; k++) {   // gerade Stücke der Landstraße im Quartier
+    let e = k; while (e + 1 < land.length && use[land[e + 1]] === 'wohn' && dirTo(land[e], land[e + 1]) === dirTo(land[k], land[k + 1])) e++;
+    if (e - k >= 5 && use[land[k]] === 'wohn') branchFrom(land.slice(k, e + 1), dirTo(land[k], land[k + 1]));
+    k = Math.max(k, e - 1);
   }
-  if (!forest) return null;
-  for (let i = 0; i < N * N; i++) if (forest[i]) fixed[i] = idx('wald');
+  // Schleifen: Enden benachbarter Seitenstraßen (gleiche Seite, gleiche Länge) verbinden
+  let schleifen = 0;
+  for (let a = 0; a < seiten.length; a++) for (let b = a + 1; b < seiten.length; b++) {
+    const A = seiten[a], Bs = seiten[b];
+    if (A.loop || Bs.loop || A.d !== Bs.d || A.line !== Bs.line || Math.abs(A.k - Bs.k) !== 3 || A.cells.length !== Bs.cells.length || A.cells.length < 3) continue;
+    if (rng() < 0.3) continue;   // manche bleiben Sackgassen
+    const ea = A.cells[A.cells.length - 1], eb = Bs.cells[Bs.cells.length - 1];
+    const d = dirTo(ea, ea + (eb > ea ? (Math.abs(eb - ea) < N ? 1 : N) : (Math.abs(eb - ea) < N ? -1 : -N)));
+    const mid = ray(ea, d, 2, () => true);
+    if (mid.length === 2 && net.add([ea, ...mid, eb], 1, { join0: true, joinEnd: true, name: 'Wohnschleife' })) { A.loop = Bs.loop = true; schleifen++; }
+  }
 
-  // ---- 4. Ecken → Kanten → Flächen
-  const W8 = {}; for (const t of ['wohn', 'acker', 'wald']) W8[t] = weightsFor(t);
-  const AL = {}; for (const t of Object.keys(W8)) AL[t] = [...W8[t].keys()].filter(i => W8[t][i] > 0);
-  const filler = [idx('wiese'), idx('brache')];
+  // Quartier auf das Einzugsgebiet seiner Straßen zuschneiden (≤ 2 Zellen von einer Straße im Ort); der Rest wird
+  // Acker – so endet der Ort dort, wo seine Straßen enden, und nicht an einer gedachten Linie
+  {
+    const dRoad = distInside(i => !(net.kind[i] === 1 && use[i] === 'wohn'), 4);
+    let n = 0;
+    for (let i = 0; i < N * N; i++) if (use[i] === 'wohn' && dRoad[i] > 2) { use[i] = 'acker'; n++; }
+    const keep = largestComponent(Uint8Array.from(use, u => u === 'wohn' ? 1 : 0));
+    for (let i = 0; i < N * N; i++) if (use[i] === 'wohn' && !keep[i]) use[i] = 'acker';
+    dWohn = distInside(i => use[i] === 'wohn'); dAcker = distInside(i => use[i] === 'acker');
+  }
+
+  // ---- 4. Acker: Parzellen (Voronoi um 4 Saatpunkte, durch Straßen getrennt), Hofgrundstück, Wege an den Grenzen
+  const ackerFrei = i => use[i] === 'acker' && !net.kind[i];
+  const pool = []; for (let i = 0; i < N * N; i++) if (ackerFrei(i) && dAcker[i] >= 3) pool.push(i);
+  if (pool.length < 300) return fail('acker-klein');
+  const seeds = [pool[Math.floor(rng() * pool.length)]];
+  while (seeds.length < 4) {   // weit auseinander
+    let bi = -1, bd = -1;
+    for (let t = 0; t < 200; t++) { const i = pool[Math.floor(rng() * pool.length)], d = Math.min(...seeds.map(s => Math.hypot(i % N - s % N, ((i / N) | 0) - ((s / N) | 0)))); if (d > bd) { bd = d; bi = i; } }
+    seeds.push(bi);
+  }
+  const vor = new Int32Array(N * N).fill(-1);
+  for (let i = 0; i < N * N; i++) if (ackerFrei(i)) {
+    let bk = -1, bd = 1e9;
+    seeds.forEach((s, k) => { const d = Math.abs(i % N - s % N) + Math.abs(((i / N) | 0) - ((s / N) | 0)) + vnoise((i % N) / 6, ((i / N) | 0) / 6, off + 20 + k) * 5; if (d < bd) { bd = d; bk = k; } });
+    vor[i] = bk;
+  }
+  // Hof: an einer Parzellengrenze, abseits von Straße und Ort, mit Hofwiese ringsum
+  let hof = -1;
+  const hofCand = pool.filter(i => n4(i).some(j => vor[j] >= 0 && vor[j] !== vor[i]) && dWohn[i] >= 0 && Math.hypot(i % N - c[0], ((i / N) | 0) - c[1]) > 14);
+  for (let t = 0; t < 40 && hof < 0 && hofCand.length; t++) {
+    const h = hofCand[Math.floor(rng() * hofCand.length)];
+    const ring = []; const [hx, hy] = XY(h);
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) ring.push((hy + dy) * N + hx + dx);
+    if (ring.every(i => ackerFrei(i) && n4(i).every(j => !net.kind[j]))) hof = h;
+  }
+  if (hof < 0) return fail('hof');
+  const hofRing = []; { const [hx, hy] = XY(hof); for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (dx || dy) hofRing.push((hy + dy) * N + hx + dx); }
+  net.kind[hof] = 3;
+  const reserved = new Uint8Array(N * N); for (const i of hofRing) reserved[i] = 1;   // Hofwiese
+  // Wege: vom Hof und von jeder Parzelle zum vorhandenen Netz, bevorzugt entlang der Parzellengrenzen
+  const grenz = i => n4(i).some(j => vor[j] >= 0 && vor[j] !== vor[i]);
+  const wegOk = i => use[i] !== 'wohn' && !reserved[i] && (use[i] === 'acker' || dWald[i] <= 2);
+  const wegCost = (i, j) => (grenz(j) ? 1 : 5) + (use[j] === 'wald' ? 6 : 0) + vnoise((j % N) / 4, ((j / N) | 0) / 4, off + 30) * 0.5;
+  const connect = (starts, startJoin, name) => {
+    // Dijkstra von den Startzellen bis zu einer Zelle, an der ein Ast ans Netz darf
+    const banned = new Set();
+    for (let tr = 0; tr < 4; tr++) {
+      const path = shortest(starts, (i, j) => {
+        if (net.kind[j]) return net.canBranch(j, 2) && n4(i).filter(q => net.kind[q]).length === 1 ? 1 : Infinity;
+        const durchHof = net.kind[i] === 3 && reserved[j];   // Zufahrt durch die Hofwiese
+        if ((!wegOk(j) && !durchHof) || banned.has(j)) return Infinity;
+        const nb = n4(j).filter(q => net.kind[q] && q !== i);
+        if (nb.length > 1 || (nb.length === 1 && !net.canBranch(nb[0], 2))) return Infinity;
+        return wegCost(i, j) + tr * rng();
+      }, i => net.kind[i] && !starts.includes(i));
+      if (!path) return null;
+      const okC = i => wegOk(i) || (startJoin && reserved[i] && n4(i).includes(path[0]));
+      const ok = startJoin ? net.add(path, 2, { join0: true, joinEnd: true, ok: okC, name }) : net.add(path, 2, { joinEnd: true, ok: okC, name });
+      if (ok) { for (const i of path) if (net.kind[i] === 2) reserved[i] = 0; return path; }
+      for (const i of path) if (!net.kind[i]) banned.add(i);
+    }
+    return null;
+  };
+  const hofWeg = connect([hof], true, 'Hofzufahrt');
+  if (!hofWeg) return fail('hofzufahrt');
+  if (new Set(hofWeg.map(secKey)).size < 2) return fail('hofzufahrt-ohne-grenze');   // Abnahme: Zufahrt über eine Sektorgrenze
+  // Parzellen (nach Straßen getrennt) bestimmen und erschließen
+  const parcelOf = new Int32Array(N * N).fill(-1), parcels = [];
+  const fieldCell = i => vor[i] >= 0 && !net.kind[i] && !reserved[i];
+  for (let i = 0; i < N * N; i++) if (fieldCell(i) && parcelOf[i] < 0) {
+    const cells = [i]; parcelOf[i] = parcels.length;
+    for (let k = 0; k < cells.length; k++) for (const j of n4(cells[k])) if (fieldCell(j) && parcelOf[j] < 0 && vor[j] === vor[i]) { parcelOf[j] = parcels.length; cells.push(j); }
+    parcels.push({ id: parcels.length, cells });
+  }
+  const big = parcels.filter(p => p.cells.length >= 40).sort((a, b) => b.cells.length - a.cells.length);
+  if (big.length < 4) return fail('parzellen');
+  for (const p of big) {
+    const touches = () => p.cells.some(i => n4(i).some(j => net.kind[j] === 1 || net.kind[j] === 2));
+    if (touches()) continue;
+    const border = p.cells.filter(i => n4(i).some(j => parcelOf[j] !== p.id));
+    if (!connect(border, false, 'Feldweg')) return fail('feldweg');
+  }
+  // Parzellen nach den Wegen neu fassen; Raine (Hecken) zwischen Parzellen ohne Weg
+  parcelOf.fill(-1); const fields = [];
+  for (let i = 0; i < N * N; i++) if (fieldCell(i) && parcelOf[i] < 0) {
+    const cells = [i]; parcelOf[i] = fields.length;
+    for (let k = 0; k < cells.length; k++) for (const j of n4(cells[k])) if (fieldCell(j) && parcelOf[j] < 0 && vor[j] === vor[i]) { parcelOf[j] = fields.length; cells.push(j); }
+    fields.push({ id: fields.length, cells });
+  }
+  const hecke = new Uint8Array(N * N);
+  for (let i = 0; i < N * N; i++) if (parcelOf[i] >= 0 && n4(i).some(j => parcelOf[j] >= 0 && vor[j] !== vor[i] && vor[j] < vor[i])) hecke[i] = 1;
+
+  // ---- 5. feste Vorgaben für WFC
+  const fixed = new Int32Array(N * N).fill(-1);
+  for (let i = 0; i < N * N; i++) {
+    const k = net.kind[i];
+    if (k === 1) fixed[i] = ROAD(net.mask[i] & 15);
+    else if (k === 2) fixed[i] = WEG(net.mask[i]);
+    else if (k === 3) fixed[i] = HOF(net.mask[i]);
+    else if (reserved[i]) fixed[i] = idx('wiese');
+    else if (hecke[i]) fixed[i] = idx('hecke');
+    else if (parcelOf[i] >= 0 && dAcker[i] >= 2) fixed[i] = idx('feld');
+    else if (use[i] === 'wald' && dWald[i] >= 2) fixed[i] = idx('wald');
+  }
+  for (const e of exits) fixed[e.cell] = ROAD(net.mask[e.cell]);
+  // geplante Felder: größtes zusammenhängendes Stück je Parzelle; kleine Reste und kleine Parzellen werden Wiese
+  const FELD = idx('feld'), WIESE = idx('wiese'), planned = [];
+  for (const p of fields) {
+    const cells = p.cells.filter(i => fixed[i] === FELD), set = new Set(cells), seen = new Set(), comps = [];
+    for (const i of cells) if (!seen.has(i)) {
+      const cc = [i]; seen.add(i);
+      for (let k = 0; k < cc.length; k++) for (const j of n4(cc[k])) if (set.has(j) && !seen.has(j)) { seen.add(j); cc.push(j); }
+      comps.push(cc);
+    }
+    comps.sort((a, b) => b.length - a.length);
+    comps.forEach((cc, k) => {
+      if (k === 0 && cc.length >= 60) planned.push({ id: p.id, cells: cc });
+      else if (cc.length < 25 || k === 0) for (const i of cc) fixed[i] = WIESE;
+    });
+  }
+  if (planned.length < 4) return fail('felder');
+
+  // ---- 6. Waldrand über eine Sektorgrenze: Grenzabschnitt suchen, an dem der Rand die Grenze kreuzt
+  const segs = [];
+  for (let v = 1; v < K; v++) for (let r = 0; r < K; r++) {
+    segs.push({ v: true, b: v * SEKTOR, lo: r * SEKTOR, hi: (r + 1) * SEKTOR });
+    segs.push({ v: false, b: v * SEKTOR, lo: r * SEKTOR, hi: (r + 1) * SEKTOR });
+  }
+  const isW = i => fixed[i] === idx('wald') || use[i] === 'wald';
+  let forestEdge = null, bestV = 99;
+  for (const sg of segs) {
+    let both = 0, none = 0, mism = 0, cross = 0, prev = null;
+    for (let k = sg.lo; k < sg.hi; k++) {
+      const a = isW(sg.v ? k * N + sg.b - 1 : (sg.b - 1) * N + k), b2 = isW(sg.v ? k * N + sg.b : sg.b * N + k);
+      if (a !== b2) { mism++; continue; } if (a) both++; else none++;
+      if (prev !== null && prev !== a) cross++; prev = a;
+    }
+    if (both >= 3 && none >= 2 && cross >= 1 && mism < bestV) { bestV = mism; forestEdge = sg; }
+  }
+  if (!forestEdge) return fail('waldrand');
+
+  // ---- 7. Ecken → Kanten → Flächen
+  const W8 = {}, AL = {};
+  for (const u of ['wohn', 'acker', 'wald']) { W8[u] = weightsFor(u); AL[u] = [...W8[u].keys()].filter(i => W8[u][i] > 0); }
+  const filler = [idx('wiese')];
   const exitAt = new Map(exits.map(e => [e.cell * 4 + e.d, R]));
   const ps = planSectors({
     N, S: SEKTOR, seed: subSeed(seed, 80, attempt), reverse: !!o.reverse, filler,
     tiles: { weights: TILES.map(() => 1), sockets: SOCK2, compat: COMPAT2, border: BORDER_OK },
-    weightsAt: (x, y) => W8[typeAt(x, y)], allowedAt: (x, y) => AL[typeAt(x, y)], fixedAt: (x, y) => fixed[y * N + x],
+    weightsAt: (x, y) => W8[use[y * N + x]], allowedAt: (x, y) => AL[use[y * N + x]], fixedAt: (x, y) => fixed[y * N + x],
     mapEdge: (x, y, d) => exitAt.get((y * N + x) * 4 + d) ?? -2,
-    accept: (p, get) => p.kind === 'flaeche' ? strayRoads(p, get) : 0,
   });
   const grid = Array.from(ps.grid);
-  const spawnCell = roadPath.reduce((b, c2) => Math.hypot(c2 % N - center[0] * SEKTOR, ((c2 / N) | 0) - center[1] * SEKTOR) < Math.hypot(b % N - center[0] * SEKTOR, ((b / N) | 0) - center[1] * SEKTOR) ? c2 : b, roadPath[0]);
-  return {
-    N, S: SEKTOR, K, grid, order: ps.order, types, center, issues: ps.issues,
-    pieces: ps.pieces.map(p => ({ kind: p.kind, x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1, tries: p.tries, filler: p.filler })),
-    net: { road: roadPath, weg: wegPath.slice(1, -1), exits, hof, hofDir, junction },
-    field, forest: Array.from(forest), forestEdge, spawn: { tx: spawnCell % N, ty: (spawnCell / N) | 0 }, attempt,
-  };
-}
-function countBits(m) { return (m & 1) + (m >> 1 & 1) + (m >> 2 & 1) + (m >> 3 & 1); }
-
-/** Straßenstücke einer Fläche, die keinen Anschluss nach draußen haben (Zellen). 0 = alles angebunden. */
-function strayRoads(p, get) {
-  const isR = t => t >= 0 && (TILES[t].kind === 'road');
-  const seen = new Set(); let stray = 0;
-  for (let y = p.y0; y < p.y1; y++) for (let x = p.x0; x < p.x1; x++) {
-    const i = y * N + x; if (seen.has(i) || !isR(get(x, y))) continue;
-    const comp = [i]; seen.add(i); let out = false;
-    for (let k = 0; k < comp.length; k++) {
-      const c = comp[k], cx = c % N, cy = (c / N) | 0, m = TILES[get(cx, cy)].mask;
-      for (let d = 0; d < 4; d++) if (m >> d & 1) {
-        const nx = cx + DIRS[d][0], ny = cy + DIRS[d][1];
-        if (nx < p.x0 || ny < p.y0 || nx >= p.x1 || ny >= p.y1) { out = true; continue; }
-        const j = ny * N + nx; if (!seen.has(j)) { seen.add(j); comp.push(j); }
-      }
-    }
-    if (!out) stray += comp.length;
+  // Gebäude ohne Straße davor werden zu Gärten (B → G passt zu allen Nachbarn von B)
+  let umgewandelt = 0;
+  for (let i = 0; i < N * N; i++) {
+    const k = TILES[grid[i]].kind;
+    if ((k === 'haus' || k === 'laden' || k === 'parkplatz') && !n4(i).some(j => TILES[grid[j]].kind === 'road')) { grid[i] = idx('garten'); umgewandelt++; }
   }
-  return stray;
+  // Sektortyp = überwiegende Nutzung (nur Anzeige)
+  const types = [];
+  for (let sy = 0; sy < K; sy++) for (let sx = 0; sx < K; sx++) {
+    const cnt = { wohn: 0, acker: 0, wald: 0 };
+    for (let y = sy * SEKTOR; y < (sy + 1) * SEKTOR; y++) for (let x = sx * SEKTOR; x < (sx + 1) * SEKTOR; x++) cnt[use[y * N + x]]++;
+    types.push(Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a])[0]);
+  }
+  const spawnCell = land.reduce((b2, x) => Math.hypot(x % N - c[0], ((x / N) | 0) - c[1]) < Math.hypot(b2 % N - c[0], ((b2 / N) | 0) - c[1]) ? x : b2, land[0]);
+  return {
+    N, S: SEKTOR, K, grid, order: ps.order, types, use: use.map(u => u[0]).join(''), center: c, issues: ps.issues, attempt, umgewandelt,
+    pieces: ps.pieces.map(p => ({ kind: p.kind, x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1, tries: p.tries, filler: p.filler })),
+    net: { exits, hof, junction: hofWeg[hofWeg.length - 1], hofWeg, roads: net.parts.filter(p => p.kind === 1).map(p => ({ name: p.name, cells: p.cells })),
+      wege: net.parts.filter(p => p.kind === 2).map(p => ({ name: p.name, cells: p.cells })), schleifen },
+    fields: planned, parcelOf: Array.from(parcelOf), forestEdge, spawn: { tx: spawnCell % N, ty: (spawnCell / N) | 0 },
+  };
 }
 
 // ---------------------------------------------------------------- Prüfungen (Tests, Karte)

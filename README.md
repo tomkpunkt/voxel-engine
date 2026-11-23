@@ -13,11 +13,12 @@ python3 -m http.server 8765
 #   http://localhost:8765/games/totenstadt/index.html       das Spiel
 #   http://localhost:8765/examples/kleine-welt/index.html   kleine Beispielwelt
 #   http://localhost:8765/examples/lichter/index.html       Lichter-Stressszene
+#   http://localhost:8765/games/totenstadt/karte.html       Weltplan als Karte
 ```
 
 ES-Module laden nicht über `file://`, darum braucht es einen lokalen Server.
 
-URL-Parameter für reproduzierbare Bilder: `?saat=4711` (Stadt), `?zeit=12` (Uhrzeit 0–24), `?leer` (Totenstadt ohne Zombies), `?dichte=20|10|5` und `?sub=1|2|4` (Kleine Welt), `?ohneWorker`, `?debug` (Leistungsanzeige, auch F3), `?n=` und `?schatten=` (Lichter-Stressszene).
+URL-Parameter für reproduzierbare Bilder: `?saat=4711` (Stadt), `?zeit=12` (Uhrzeit 0–24), `?leer` (Totenstadt ohne Zombies), `?dichte=20|10|5` und `?sub=1|2|4` (Kleine Welt), `?ohneWorker`, `?welt=ortsrand` (Totenstadt mit dem Weltplaner statt der Stadt), `?debug` (Leistungsanzeige, auch F3), `?n=` und `?schatten=` (Lichter-Stressszene).
 
 ## Aufbau
 
@@ -31,7 +32,8 @@ engine/
   ecs/        ecs.js (Entities, Systeme), flowfield.js (Wegfindung)
   physics/    ragdoll.js – Ragdolls (Rapier.js vom CDN oder eigener Verlet), Revoxelisierung der Teile
   destruct/   debris.js (Block-Partikel, Emitter), destruct.js (carve, shatter, checkSupport, drop)
-  gen/        wfc.js (Wave Function Collapse mit Sockeln), floorplan.js (Split-Grammatik)
+  gen/        wfc.js (Wave Function Collapse mit Sockeln, auch für Rechtecke mit festen Rändern),
+              sektoren.js (Weltplan: Ecken → Kanten → Flächen), floorplan.js (Split-Grammatik)
   platform/   input.js (Tastatur, Maus, Touch, Gamepad, Kamera-Gesten), audio.js (Synth),
               debug.js (Profiler, F3-Anzeige), storage.js (Spielstände in IndexedDB)
   index.js    öffentliche API
@@ -125,6 +127,17 @@ renderer.drawSprite(spr, 0, b.x, b.y, 0, { dens: 4, z: b.z });
 ```
 
 Rapier wird nur geladen, wenn man es will (`backend: 'auto'` oder `'rapier'`); das ist die einzige Abhängigkeit von außen und bleibt optional.
+
+## Weltplaner
+
+```js
+import { planSectors } from './engine/gen/sektoren.js';
+// Raster N × N in Sektoren à S; feste Vorgaben (Straßen, Felder …) zuerst, dann Ecken, Kanten, Flächen per WFC
+const { grid, order, pieces, issues } = planSectors({ N: 64, S: 16, seed, tiles: { weights, sockets, compat, border },
+  allowedAt: (x, y) => kachelnDerFläche, weightsAt: (x, y) => gewichteDerFläche, fixedAt: (x, y) => vorgabeOder_1 });
+```
+
+Ein Beispiel für ein ganzes Setting steht in `games/totenstadt/weltplan.js` (suburbaner Ortsrand: Flächen, Straßen und Parzellen vor WFC); `games/totenstadt/karte.html?saat=…` zeigt den Plan mit Sektorgrenzen und Prüfstellen.
 
 ## Wichtige Begriffe
 

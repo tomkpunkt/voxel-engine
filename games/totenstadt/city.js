@@ -34,6 +34,7 @@ for (let m = 1; m < 16; m++) {
 }
 TILES.push({ kind: 'garten', mask: 0, w: 0 }, { kind: 'wiese', mask: 0, w: 0 }, { kind: 'feld', mask: 0, w: 0 }, { kind: 'wald', mask: 0, w: 0 });
 for (const m of [1, 2, 4, 8]) TILES.push({ kind: 'hof', mask: m, deg: 1, w: 0 });
+TILES.push({ kind: 'hecke', mask: 0, w: 0 });   // Feldrain: Wiesenstreifen mit Hecke, verbindet sich mit Nachbar-Hecken
 
 /** Stadtplan: bester von bis zu 80 WFC-Läufen (Straßenanteil nahe 30 %). */
 export function cityPlan(seed, n = GN) {
@@ -529,7 +530,7 @@ export function createGenerator(config) {
       const gx = ox + x, gy = oy + y, h = hash3(gx, gy, 6);
       S(x, y, 0, C(lawn(x, y, bio.wiese)));
       if (h < 0.2) S(x, y, 1, C(jit(bio.wiese[h < 0.1 ? 1 : 2], 0.35, h)));
-      if (h > 0.985) S(x, y, 1, C(bio.blumen[(h * 1000 | 0) % bio.blumen.length]));
+      if (h > 0.996) S(x, y, 1, C(bio.blumen[(h * 1000 | 0) % bio.blumen.length]));
     }
     // Hecke dort, wo Feld und Wald an diese Wiese stoßen (Feldrain → Hecke → Waldrand)
     const sides = [0, 1, 2, 3].map(nbKind);
@@ -554,10 +555,32 @@ export function createGenerator(config) {
     }
     for (const [x, y] of [[8, 8], [60, 52], [30, 30]]) if (rng() < 0.45) tree(x, y);
   }
+  // Feldrain: Wiesenstreifen, Hecke durch die Mitte zu den Nachbar-Hecken (so entstehen durchgehende Hecken)
+  function hecke() {
+    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
+      const gx = ox + x, gy = oy + y, h = hash3(gx, gy, 6);
+      S(x, y, 0, C(lawn(x, y, bio.wiese))); if (h < 0.25) S(x, y, 1, C(jit(bio.wiese[1], 0.35, h)));
+    }
+    const nb = [0, 1, 2, 3].map(d => nbKind(d) === 'hecke');
+    const arms = nb.some(Boolean) ? nb : [nb[0] || true, nb[1], nb[2] || true, nb[3]];
+    const seg = (x0, y0, x1, y1) => {
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+        const gx = ox + x, gy = oy + y; if (hash3(gx >> 2, gy >> 2, 44) < 0.06) continue;
+        const top = 5 + Math.round(vnoise(gx / 4, gy / 4, 43) * 3);
+        for (let z = 1; z <= top; z++) S(x, y, z, C(jit(z < 2 ? bio.stamm : (hash3(gx, gy, z) < 0.5 ? bio.hecke[0] : bio.hecke[1]), 0.3, hash3(gx, gy, z + 5))));
+      }
+    };
+    const a = 38, b = 41;
+    seg(a, a, b, b);
+    if (arms[0]) seg(a, 0, b, a); if (arms[2]) seg(a, b, b, TS - 1); if (arms[3]) seg(0, a, a, b); if (arms[1]) seg(b, a, TS - 1, b);
+    for (let k = 0; k < 2; k++) if (rng() < 0.35) { const along = 8 + ri(rng, 0, 60), v = arms[0] || arms[2]; tree(v ? a - 1 : along, v ? along : a - 1); }
+  }
   // Feld: Frucht und Reihenrichtung aus großräumigem Rauschen, damit ein Schlag über mehrere Kacheln gleich aussieht
   function feld() {
-    const sc = plan.seed % 997, fi = Math.floor(vnoise(tx / 4.5, ty / 4.5, sc) * bio.feld.length * 0.999), fr = bio.feld[Math.min(bio.feld.length - 1, fi)];
-    const rowsX = vnoise(tx / 6, ty / 6, sc + 3) > 0.5;
+    // Frucht und Reihenrichtung je Parzelle (aus dem Plan), sonst aus großräumigem Rauschen
+    const sc = plan.seed % 997, pid = plan.parcelOf ? plan.parcelOf[ty * GN + tx] : -1;
+    const fi = pid >= 0 ? (pid * 7 + sc) % bio.feld.length : Math.floor(vnoise(tx / 4.5, ty / 4.5, sc) * bio.feld.length * 0.999), fr = bio.feld[Math.min(bio.feld.length - 1, fi)];
+    const rowsX = pid >= 0 ? ((pid * 13 + sc) >> 1) % 2 === 0 : vnoise(tx / 6, ty / 6, sc + 3) > 0.5;
     const rand = [0, 1, 2, 3].map(d => nbKind(d) !== 'feld');
     for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
       const gx = ox + x, gy = oy + y, h = hash3(gx, gy, 8);
@@ -653,6 +676,7 @@ export function createGenerator(config) {
   else if (t.kind === 'feld') feld();
   else if (t.kind === 'wald') wald();
   else if (t.kind === 'hof') hof(t.mask);
+  else if (t.kind === 'hecke') hecke();
   else lot();
 
   // Türen im (gespeicherten) Zustand einsetzen, lokale Koordinaten
